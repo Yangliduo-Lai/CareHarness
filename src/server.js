@@ -19,10 +19,11 @@ const route=async(req,res)=>{const url=new URL(req.url,`http://${req.headers.hos
     if(req.method==='GET'&&/^\/api\/states\/[^/]+$/.test(path))return json(res,200,{subject_id:decodeURIComponent(path.split('/').at(-1)),states:store.statesFor(decodeURIComponent(path.split('/').at(-1)))});
     if(req.method==='POST'&&path==='/api/model/test'){const b=await parse(req),g=new ModelGateway(b);return json(res,200,await g.testConnection());}
     if(req.method==='POST'&&/^\/api\/benchmarks\/[^/]+\/preview$/.test(path)){const b=await parse(req),name=path.split('/')[3];return json(res,200,harness.preview(name,b));}
-    if(req.method==='POST'&&/^\/api\/benchmarks\/[^/]+\/start$/.test(path)){const b=await parse(req),name=path.split('/')[3];return json(res,200,await harness.start(name,b));}
+    if(req.method==='POST'&&/^\/api\/benchmarks\/[^/]+\/start$/.test(path)){const b=await parse(req),name=path.split('/')[3];return json(res,202,harness.launch(name,b));}
     if(req.method==='GET'&&path==='/api/experiments')return json(res,200,harness.list());
     if(req.method==='GET'&&/^\/api\/experiments\/[^/]+$/.test(path)){const x=harness.get(path.split('/').at(-1));return x?json(res,200,x):json(res,404,{error:'Experiment not found'});}
     if(req.method==='POST'&&/^\/api\/experiments\/[^/]+\/(pause|resume|cancel)$/.test(path)){const bits=path.split('/');return json(res,200,harness.control(bits[3],bits[4]));}
+    if(req.method==='POST'&&/^\/api\/experiments\/[^/]+\/retry-failed$/.test(path))return json(res,202,harness.retryFailed(path.split('/')[3]));
     if(req.method==='GET'&&path.startsWith('/api/'))return json(res,404,{error:'API route not found',path});
     return staticFile(path,res);
   }catch(error){const status=error.run_id?422:400;return json(res,status,{error:String(error.message||error),run_id:error.run_id||null,detail:error.publicError||null});}

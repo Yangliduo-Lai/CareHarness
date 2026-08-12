@@ -12,7 +12,7 @@
 ## Honest limitations
 
 - The compatible scorer is deliberately minimal; official/LLM judge execution requires the benchmark's external dependencies and a configured model. The UI never labels mock results as official.
-- Experiment pause/resume/cancel is implemented at observation boundaries in the backend. The current compact UI exposes controls as disabled until a long-running asynchronous job transport is introduced; single-sample and bounded batches work synchronously.
+- Experiment jobs run in the background; Pause / Resume / Cancel apply at safe observation boundaries, retain completed results, and the UI polls progress with ETA, current sample, failures, tokens, cost, and latency.
 - Step rerun currently creates a complete isolated debug branch from the same input. It records the selected step in the UI but does not yet reuse a materialized intermediate checkpoint.
 - Cost is estimated as zero for Mock. Provider-specific pricing tables are not hardcoded because they change; latency and token usage remain captured.
 
