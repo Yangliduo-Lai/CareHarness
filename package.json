@@ -1,0 +1,14 @@
+{
+  "name": "careharness",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Six-state longitudinal care pipeline and benchmark debugger",
+  "scripts": {
+    "start": "node --experimental-sqlite src/server.js",
+    "dev": "node --experimental-sqlite --watch src/server.js",
+    "test": "node --experimental-sqlite --test",
+    "smoke": "node --experimental-sqlite scripts/smoke.js"
+  },
+  "engines": { "node": ">=22.5" }
+}
