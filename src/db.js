@@ -5,7 +5,7 @@ import { sanitizeSecrets } from './schema.js';
 
 export class Store {
   constructor(path = process.env.CAREHARNESS_DB_PATH || './data/careharness.sqlite') {
-    this.path = resolve(path); mkdirSync(dirname(this.path), { recursive: true });
+    this.path = path === ':memory:' ? path : resolve(path); if (this.path !== ':memory:') mkdirSync(dirname(this.path), { recursive: true });
     this.db = new DatabaseSync(this.path); this.db.exec('PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;'); this.migrate();
   }
   migrate() {

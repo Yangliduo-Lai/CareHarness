@@ -1,0 +1,2 @@
+import { MedMemoryAdapter } from './medmemory.js'; import { MedLoCoMoAdapter } from './medlocomo.js'; import { MusPsyAdapter } from './muspsy.js'; import { PsychEvalAdapter } from './psycheval.js';
+export function adapters(root=process.env.CAREHARNESS_DATA_ROOT||'/Users/cqmrl/Desktop/Medical Harness/Datasets'){return{medmemorybench:new MedMemoryAdapter(root),medlocomo:new MedLoCoMoAdapter(root),muspsy:new MusPsyAdapter(root),psycheval:new PsychEvalAdapter(root)};}
