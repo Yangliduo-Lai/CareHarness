@@ -27,7 +27,7 @@ npm test
 npm run smoke
 ```
 
-The smoke command runs one core observation and one real local sample boundary from each of MedMemoryBench, MedLoCoMo, MusPsy, and PsychEval using the clearly labeled offline mock provider. Mock output validates the end-to-end system but is not a real benchmark score.
+The smoke command runs one core observation and one real local sample plus one harness-side task from each of MedMemoryBench, MedLoCoMo, MusPsy, and PsychEval using the clearly labeled offline mock provider. Mock output validates observation ingestion, externally submitted query/task, score persistence, and drill-down, but is not a real benchmark score.
 
 ## Guide for a user who does not read code
 

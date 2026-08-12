@@ -11,7 +11,7 @@
 
 ## Honest limitations
 
-- The compatible scorer is deliberately minimal; official/LLM judge execution requires the benchmark's external dependencies and a configured model. The UI never labels mock results as official.
+- The harness submits benchmark query/tasks only after core State construction, persists `ScoreResult`-shaped drill-down (output, gold, reason, evidence trace, raw judge, cost/latency/tokens), and provides a deliberately minimal compatible scorer. Official/LLM judge execution still requires benchmark dependencies and a configured model; the UI never labels mock results as official.
 - Experiment jobs run in the background; Pause / Resume / Cancel apply at safe observation boundaries, retain completed results, and the UI polls progress with ETA, current sample, failures, tokens, cost, and latency.
 - Step rerun currently creates a complete isolated debug branch from the same input. It records the selected step in the UI but does not yet reuse a materialized intermediate checkpoint.
 - Cost is estimated as zero for Mock. Provider-specific pricing tables are not hardcoded because they change; latency and token usage remain captured.
