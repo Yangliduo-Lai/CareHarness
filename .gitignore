@@ -1,4 +1,7 @@
 .env
+/careharness.db
+/careharness.db-shm
+/careharness.db-wal
 data/*.sqlite
 data/*.sqlite-*
 outputs/
