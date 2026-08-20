@@ -5,7 +5,7 @@ import{ExperimentHarness}from'../src/experiments.js';
 import{adapters}from'../src/adapters/index.js';
 import{ModelGateway}from'../src/gateway.js';
 import{medLoCoMoJudgeInput,medLoCoMoTokenF1,normalizeMedLoCoMoAnswer,scoreMedLoCoMoAbstention,validateMedLoCoMoJudgeOutput}from'../src/medlocomo-official.js';
-import{benchmarkAnswerContract,promptFor}from'../src/prompts.js';
+import{MEDLOCOMO_APPENDIX_B2_JUDGE_SYSTEM_PROMPT,MEDLOCOMO_PROTOCOL_DERIVED_ANSWER_SYSTEM_PROMPT,PROMPTS,benchmarkAnswerContract,medLoCoMoAnswerMessages,medLoCoMoJudgeMessages,promptFor}from'../src/prompts.js';
 
 test('MedLoCoMo token F1 follows official normalization and comma-aware matching',()=>{
   assert.equal(medLoCoMoTokenF1('The acute kidney injury.','acute kidney injury'),1);
@@ -20,6 +20,28 @@ test('MedLoCoMo adversarial matcher accepts normalized abstentions but rejects e
   assert.equal(scoreMedLoCoMoAbstention('Insufficient grounded evidence in the visible history.').score,0);
 });
 
+test('MedLoCoMo Answer uses a dedicated non-verbatim protocol-derived plain-text prompt',()=>{
+  const input={task:'medical_reasoning',question:'What kidney issue developed?',retrieved_states:[{state_id:'s2',event_time:'2024-02-01',value:'Later record.'},{state_id:'s1',event_time:'2024-01-01',value:'The patient developed acute kidney injury.'}],retrieved_evidence:[{evidence_id:'e1',event_time:'2024-01-01',text:'The patient developed acute kidney injury.'}],gold:['must stay hidden'],expected_answer:'must stay hidden',judge_metadata:{reason:'must stay hidden'},answer_contract:{format:'must stay internal'}},messages=medLoCoMoAnswerMessages(input),rendered=promptFor('medlocomo_answer',input);
+  assert.equal(PROMPTS.medlocomo_answer.version,'medlocomo-answer.protocol-derived-v1');
+  assert.match(PROMPTS.medlocomo_answer.description,/Protocol-derived, non-verbatim/);
+  assert.deepEqual(messages.map(message=>message.role),['system','user']);
+  assert.equal(messages[0].content,MEDLOCOMO_PROTOCOL_DERIVED_ANSWER_SYSTEM_PROMPT);
+  assert.match(messages[0].content,/preferably 1 to 7 words and never more than 10 words/);
+  assert.match(messages[0].content,/return exactly: the question is not answerable/);
+  assert.equal(messages[1].content,rendered);
+  assert.match(rendered,/The patient developed acute kidney injury/);
+  assert.ok(rendered.indexOf('The patient developed acute kidney injury')<rendered.indexOf('Later record'));
+  assert.ok(rendered.endsWith('Answer:'));
+  assert.doesNotMatch(JSON.stringify(messages),/must stay hidden|answer_contract|gold|expected_answer|judge_metadata/);
+});
+
+test('MedLoCoMo Answer sends system/user messages as plain text without JSON response_format',async()=>{
+  const priorFetch=globalThis.fetch;let request;
+  globalThis.fetch=async(_url,options)=>{request=JSON.parse(options.body);return new Response(JSON.stringify({choices:[{message:{content:'acute kidney injury'},finish_reason:'stop'}]}),{status:200});};
+  try{const gateway=new ModelGateway({provider:'openai-compatible',base_url:'https://answer.test/v1',model:'current-answer'},{apiKey:'session-key'}),input={task:'medical_reasoning',question:'What kidney issue developed?',retrieved_states:[{value:'acute kidney injury'}],retrieved_evidence:[]},result=await gateway.completeText('medlocomo_answer',input,()=>{throw new Error('unexpected mock')},{maxTokens:64});assert.equal(result.value,'acute kidney injury');assert.deepEqual(request.messages,medLoCoMoAnswerMessages(input));assert.equal(Object.hasOwn(request,'response_format'),false);assert.equal(request.max_tokens,64);}
+  finally{globalThis.fetch=priorFetch;}
+});
+
 test('MedLoCoMo Judge input and prompt reproduce the answerable-only binary contract',()=>{
   const item={score_id:'q-1',question:'What kidney issue developed?',gold:['acute kidney injury']},input=medLoCoMoJudgeInput('AKI',item),valid=validateMedLoCoMoJudgeOutput({judgments:[{qa_id:'q-1',score:1}]},item),prompt=promptFor('medlocomo_judge',input);
   assert.deepEqual(input,{items:[{qa_id:'q-1',question:'What kidney issue developed?',gold_answer:'acute kidney injury',candidate_answer:'AKI'}]});
@@ -30,15 +52,21 @@ test('MedLoCoMo Judge input and prompt reproduce the answerable-only binary cont
   assert.throws(()=>validateMedLoCoMoJudgeOutput({judgments:[{qa_id:'q-1',score:.5}]},item),/0 or 1/);
 });
 
-test('MedLoCoMo Judge uses the official system and user message roles',async()=>{
+test('MedLoCoMo Judge preserves the Appendix B.2 first-turn system and user messages verbatim',async()=>{
   const priorFetch=globalThis.fetch;let request;
   globalThis.fetch=async(_url,options)=>{request=JSON.parse(options.body);return new Response(JSON.stringify({choices:[{message:{content:'{"judgments":[{"qa_id":"q-roles","score":1}]}'},finish_reason:'stop'}]}),{status:200});};
-  try{const gateway=new ModelGateway({provider:'openai-compatible',base_url:'https://judge.test/v1',model:'current-judge'},{apiKey:'session-key'}),item={score_id:'q-roles'},input={items:[{qa_id:'q-roles',question:'Q',gold_answer:'A',candidate_answer:'A'}]};await gateway.completeJSON('medlocomo_judge',input,value=>validateMedLoCoMoJudgeOutput(value,item),()=>{throw new Error('unexpected mock')});assert.deepEqual(request.messages.map(message=>message.role),['system','user']);assert.match(request.messages[0].content,/Judge only from the provided question/);assert.equal(request.messages[1].content,JSON.stringify(input));}
+  try{const gateway=new ModelGateway({provider:'openai-compatible',base_url:'https://judge.test/v1',model:'current-judge'},{apiKey:'session-key'}),item={score_id:'q-roles'},input={items:[{qa_id:'q-roles',question:'Q',gold_answer:'A',candidate_answer:'A'}]},expectedSystem=`You are grading candidate answers for short-answer medical benchmark questions.
+Judge only from the provided question, gold_answer, and candidate_answer.
+Score 1 when the candidate answer is correct.
+Score 0 when the candidate answer is false, incorrect, unsupported, incomplete enough to be wrong, or only says it is not answerable.
+Return strict JSON with the schema {"judgments": [{"qa_id": "...", "score": 1}]}.
+Each score must be exactly one of: 0, 1.
+Return exactly one judgment per provided qa_id.`;assert.equal(MEDLOCOMO_APPENDIX_B2_JUDGE_SYSTEM_PROMPT,expectedSystem);assert.deepEqual(medLoCoMoJudgeMessages(input),[{role:'system',content:expectedSystem},{role:'user',content:JSON.stringify(input)}]);await gateway.completeJSON('medlocomo_judge',input,value=>validateMedLoCoMoJudgeOutput(value,item),()=>{throw new Error('unexpected mock')});assert.deepEqual(request.messages,medLoCoMoJudgeMessages(input));}
   finally{globalThis.fetch=priorFetch;}
 });
 
 test('MedLoCoMo answer contracts are short and canonicalize adversarial abstention',()=>{
-  for(const task of ['medical_reasoning','care_plan_rationale','longitudinal_progression','cross_admission_comparison','frequency_pattern'])assert.match(benchmarkAnswerContract('medlocomo',task).format,/at most 10 words/);
+  for(const task of ['medical_reasoning','care_plan_rationale','longitudinal_progression','cross_admission_comparison','frequency_pattern'])assert.match(benchmarkAnswerContract('medlocomo',task).format,/never more than 10 words/);
   assert.match(benchmarkAnswerContract('medlocomo','adversarial').format,/exactly: the question is not answerable/);
 });
 
@@ -54,6 +82,8 @@ test('MedLoCoMo records official metrics and can rescore a frozen complete curre
   assert.equal(adversarial.scoring_method,'medlocomo_official_adversarial_abstention_matcher');
   assert.equal(adversarial.judge_model_trace,null);
   assert.deepEqual({f1:metrics.answerable_token_f1,judge:metrics.answerable_judge_accuracy,abstention:metrics.adversarial_abstention_accuracy,combined:metrics.combined_score},{f1:1,judge:1,abstention:1,combined:1});
+  assert.ok(calls.some(call=>call.component==='medlocomo_answer'));
+  assert.equal(calls.some(call=>call.component==='judge'),false);
   assert.ok(calls.some(call=>call.component==='medlocomo_judge'));
   assert.equal(done.config.resolved_models.medlocomo_judge.model,'medlocomo-judge');
   const before={states:store.statesFor('medlocomo-metric-test'),evidence:store.evidenceFor('medlocomo-metric-test'),runs:store.db.prepare(`SELECT COUNT(*) AS n FROM runs`).get().n},rescored=await harness.start('medlocomo',{mode:'single_admission',score_only_current_state:true}),after={states:store.statesFor('medlocomo-metric-test'),evidence:store.evidenceFor('medlocomo-metric-test'),runs:store.db.prepare(`SELECT COUNT(*) AS n FROM runs`).get().n};
@@ -64,5 +94,6 @@ test('MedLoCoMo records official metrics and can rescore a frozen complete curre
 class StaticGateway{
   constructor(provider,model,calls){this.config={provider,model};this.calls=calls;}
   publicConfig(){return this.config;}
+  async completeText(component,input,mockFactory,options={}){this.calls.push({component,input,model:this.config.model,options});const value=String(this.config.provider==='mock'?await mockFactory(input):input.task==='adversarial'?'the question is not answerable':'acute kidney injury').trim();return{value,trace:{component,provider:this.config.provider,model:this.config.model,token_input:1,token_output:1,latency_ms:0,model_input:input,parsed_response:value,schema_enforcement:'plain_text',error:null,mock:this.config.provider==='mock'}};}
   async completeJSON(component,input,validator,mockFactory){this.calls.push({component,input,model:this.config.model});let raw;if(this.config.provider==='mock')raw=await mockFactory(input);else if(component==='judge')raw={answer:input.task==='adversarial'?'the question is not answerable':'acute kidney injury'};else if(component==='medlocomo_judge')raw={judgments:[{qa_id:input.items[0].qa_id,score:1}]};else raw=await mockFactory(input);const value=validator?validator(raw):raw;return{value,trace:{component,provider:this.config.provider,model:this.config.model,token_input:1,token_output:1,latency_ms:0,model_input:input,parsed_response:value,error:null,mock:this.config.provider==='mock'}};}
 }

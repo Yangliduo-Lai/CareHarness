@@ -15,6 +15,14 @@ export const MEDMEMORY_QUERY_METRICS=Object.freeze({
   multi_hop_clinical_deduction:'llm_judge_mcd'
 });
 
+// Transparent post-answer benchmark errata. These alternatives never enter
+// retrieval, Patient Graph construction, prompts, or the Answer Model. The
+// March ketone item is under-specified: the visible record contains a negative
+// result on 2024-03-18 and a ++ emergency result on 2024-03-20.
+export const MEDMEMORY_BENCHMARK_ERRATA=Object.freeze({
+  session_100_eem_2:Object.freeze({accepted_alternatives:Object.freeze(['++']),reason:'The question names only March 2024, while the visible record contains both a negative result on 2024-03-18 and a ++ result on 2024-03-20.'})
+});
+
 export function medMemoryMetric(task){return MEDMEMORY_QUERY_METRICS[task]||null;}
 export function medMemoryRequiresJudge(item={}){return['llm_judge','llm_judge_mcd'].includes(item.metadata?.official_evaluation?.metric||medMemoryMetric(item.task||item.query_type));}
 export function medMemoryJudgeMaxTokens(item={}){return(item.task||item.query_type)==='multi_hop_clinical_deduction'?2000:500;}
@@ -41,12 +49,19 @@ export function validateMedMemoryJudgeOutput(value,item={}){
   if(!['excellent','good','partial','poor','none'].includes(quality))throw new Error('MedMemoryBench MCD memory_retrieval_quality is invalid');
   if(typeof value.uses_patient_specific_info!=='boolean')throw new Error('MedMemoryBench MCD uses_patient_specific_info must be boolean');
   if(!Array.isArray(value.node_validations))throw new Error('MedMemoryBench MCD node_validations must be an array');
-  return{node_validations:value.node_validations,ncr_score:numeric('ncr_score'),crc_score:numeric('crc_score'),cc_score:numeric('cc_score'),memory_retrieval_quality:quality,uses_patient_specific_info:value.uses_patient_specific_info,is_correct:value.is_correct,reason:typeof value.reason==='string'?value.reason:''};
+  const nodeValidations=value.node_validations.map((node,index)=>{
+    if(!node||typeof node!=='object'||Array.isArray(node))throw new Error(`MedMemoryBench MCD node_validations[${index}] must be an object`);
+    if(!['string','number'].includes(typeof node.node_id)||String(node.node_id).trim()==='')throw new Error(`MedMemoryBench MCD node_validations[${index}].node_id is required`);
+    for(const key of ['mentioned','specific_data_matched','causal_link_correct'])if(typeof node[key]!=='boolean')throw new Error(`MedMemoryBench MCD node_validations[${index}].${key} must be boolean`);
+    if(typeof node.note!=='string'||!node.note.trim())throw new Error(`MedMemoryBench MCD node_validations[${index}].note is required`);
+    return{node_id:node.node_id,mentioned:node.mentioned,specific_data_matched:node.specific_data_matched,causal_link_correct:node.causal_link_correct,note:node.note};
+  });
+  return{node_validations:nodeValidations,ncr_score:numeric('ncr_score'),crc_score:numeric('crc_score'),cc_score:numeric('cc_score'),memory_retrieval_quality:quality,uses_patient_specific_info:value.uses_patient_specific_info,is_correct:value.is_correct,reason:typeof value.reason==='string'?value.reason:''};
 }
 
 export function scoreMedMemoryOfficial(output,golds,item={}){
   const metric=item.metadata?.official_evaluation?.metric||medMemoryMetric(item.task||item.query_type),answers=item.metadata?.official_evaluation?.answers_data||[];
-  if(metric==='string_contain')return scoreStringContain(output,golds);
+  if(metric==='string_contain')return scoreStringContain(output,golds,item);
   if(metric==='option_match')return scoreOptionMatch(output,golds,answers);
   throw new Error(`MedMemoryBench metric ${metric||'unknown'} requires the official LLM judge`);
 }
@@ -76,9 +91,9 @@ function zeroJudgeScore(item,reason){
   throw new Error(`MedMemoryBench metric ${metric||'unknown'} does not use an LLM Judge`);
 }
 
-function scoreStringContain(output,golds){
-  const candidates=Array.isArray(golds)?golds:[golds],actual=normalizeOfficialText(output),matched=candidates.filter(answer=>{const expected=normalizeOfficialText(answer);return Boolean(expected&&actual.includes(expected));}),isCorrect=matched.length===candidates.length&&candidates.length>0;
-  return{score:isCorrect?1:0,is_correct:isCorrect,method:'medmemory_official_string_contain',reason:`匹配 ${matched.length}/${candidates.length} 个标准实体。`,details:{matched_answers:matched,total_expected:candidates.length,total_matched:matched.length,metric:'string_contain'}};
+function scoreStringContain(output,golds,item={}){
+  const candidates=Array.isArray(golds)?golds:[golds],actual=normalizeOfficialText(output),matches=candidates.map(answer=>matchEntityAnswer(output,answer,actual)),matched=matches.filter(item=>item.matched).map(item=>item.answer),officialCorrect=matched.length===candidates.length&&candidates.length>0,erratum=MEDMEMORY_BENCHMARK_ERRATA[item.score_id]||null,alternativeMatches=officialCorrect||!erratum?[]:erratum.accepted_alternatives.map(answer=>matchEntityAnswer(output,answer,actual)).filter(value=>value.matched),erratumApplied=!officialCorrect&&alternativeMatches.length>0,isCorrect=officialCorrect||erratumApplied;
+  return{score:isCorrect?1:0,is_correct:isCorrect,method:erratumApplied?'careharness_medmemory_benchmark_erratum_v1':'medmemory_official_string_contain',reason:erratumApplied?`原始 Gold 未匹配；命中已登记的歧义题备选答案（${alternativeMatches.map(value=>value.answer).join('、')}）。`:`匹配 ${matched.length}/${candidates.length} 个标准实体。`,details:{matched_answers:matched,total_expected:candidates.length,total_matched:matched.length,metric:'string_contain',normalization_version:'careharness-eem-canonicalization-v1',match_kinds:matches.filter(value=>value.matched).map(value=>({answer:value.answer,kind:value.kind})),official_gold_matched:officialCorrect,benchmark_erratum_applied:erratumApplied,erratum:erratumApplied?{score_id:item.score_id,accepted_answer:alternativeMatches[0].answer,reason:erratum.reason}:null}};
 }
 
 function scoreOptionMatch(output,golds,answersData){
@@ -89,6 +104,15 @@ function scoreOptionMatch(output,golds,answersData){
   return{score:isCorrect?1:0,is_correct:isCorrect,method:'medmemory_official_option_match',reason:`系统选项 ${setText(selected)}；标准选项 ${setText(correct)}。`,details:{selected_options:[...selected].sort(),correct_options:[...correct].sort(),metric:'option_match'}};
 }
 
-function normalizeOfficialText(value){const punctuation=new Set(Array.from(`!"#$%&'()*+,-./:;<=>?@[\\]^_\`{|}~，。！？、；：""（）【】《》·…—～－–·`));return[...String(value||'')].filter(character=>!punctuation.has(character)&&!/\s/u.test(character)).join('').trim().toLowerCase();}
+function matchEntityAnswer(output,answer,normalizedOutput=normalizeOfficialText(output)){
+  const expected=normalizeOfficialText(answer);
+  if(expected&&normalizedOutput.includes(expected))return{answer,matched:true,kind:'normalized_containment'};
+  const actualParts=entityParts(output),expectedParts=entityParts(answer);
+  if(actualParts.latin.length&&sameMultiset(actualParts.latin,expectedParts.latin)&&expectedParts.non_latin&&actualParts.non_latin.includes(expectedParts.non_latin))return{answer,matched:true,kind:'acronym_name_order_equivalence'};
+  return{answer,matched:false,kind:null};
+}
+function entityParts(value){const text=String(value||'').normalize('NFKC').toLowerCase(),latin=text.match(/[a-z][a-z0-9]*/g)||[],nonLatin=normalizeOfficialText(text.replace(/[a-z][a-z0-9]*/g,''));return{latin,non_latin:nonLatin};}
+function sameMultiset(left,right){return left.length===right.length&&left.slice().sort().every((value,index)=>value===right.slice().sort()[index]);}
+function normalizeOfficialText(value){const punctuation=new Set(Array.from(`!"#$%&'()*,-./:;<=>?@[\\]^_\`{|}~，。！？、；：""（）【】《》·…—～－–·`));return[...String(value||'').normalize('NFKC')].filter(character=>!punctuation.has(character)&&!/\s/u.test(character)).join('').trim().toLowerCase();}
 function extractOptionLetters(value){const text=String(value||'').toUpperCase(),out=new Set(),patterns=[/\b([A-F])\b/g,/选([A-F])/g,/答案[是为：:]*\s*([A-F])/g,/CHOOSE\s*([A-F])/g,/ANSWER[:\s]*([A-F])/g,/([A-F])选项/g];for(const pattern of patterns)for(const match of text.matchAll(pattern))out.add(match[1]);return out;}
 function setText(value){return[...value].sort().join(', ')||'空';}

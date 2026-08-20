@@ -3,12 +3,15 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Six-state longitudinal care pipeline and benchmark debugger",
+  "description": "Versioned longitudinal Patient Graph, runtime harness, and benchmark debugger",
   "scripts": {
-    "start": "node --experimental-sqlite src/server.js",
-    "dev": "node --experimental-sqlite --watch src/server.js",
-    "test": "node --experimental-sqlite --test",
-    "smoke": "node --experimental-sqlite scripts/smoke.js"
+    "start": "node --env-file-if-exists=.env --experimental-sqlite src/server.js",
+    "dev": "node --env-file-if-exists=.env --experimental-sqlite --watch src/server.js",
+    "test": "node --env-file-if-exists=.env --experimental-sqlite --test",
+    "test:core": "node --env-file-if-exists=.env --experimental-sqlite --test test/careharness-*.test.js test/db.test.js test/debug-runs.test.js test/documentation.test.js test/failure-attribution.test.js test/frontend.test.js test/gateway.test.js test/lifecycle.test.js test/matched-*.test.js test/medlocomo-official.test.js test/model-registry.test.js test/new-benchmarks.test.js test/optimization-round-report.test.js test/optimizer.test.js test/patient-graph.test.js test/pipeline.test.js test/portability.test.js test/prompts.test.js test/retrieval.test.js test/router-taxonomy.test.js test/schema.test.js",
+    "smoke": "node --env-file-if-exists=.env --experimental-sqlite scripts/smoke.js",
+    "medmemory:matched": "node --experimental-sqlite --env-file-if-exists=.env scripts/run-matched-medmemory.js",
+    "medmemory:persona1": "node --experimental-sqlite --env-file-if-exists=.env scripts/run-matched-medmemory.js --dev-persona 1 --noise clean"
   },
-  "engines": { "node": ">=22.5" }
+  "engines": { "node": ">=22.9" }
 }

@@ -1,6 +1,10 @@
 import { randomUUID } from 'node:crypto';
 
 export const STATE_FAMILIES = ['BC', 'PE', 'PA', 'CS', 'CP', 'LO'];
+export const PATIENT_GRAPH_EDGE_FAMILIES = ['temporal', 'clinical_care'];
+export const PATIENT_GRAPH_RELATIONS = ['persists', 'updates', 'supersedes', 'resolves', 'recurs', 'conflicts', 'informs', 'motivates', 'constrains', 'followed_by', 'contributes_to'];
+export const PATIENT_GRAPH_EDGE_STATUSES = ['candidate', 'verified', 'rejected'];
+export const PATIENT_GRAPH_SUPPORT_KINDS = ['asserted', 'structural', 'hypothesized'];
 export const SOURCE_TYPES = ['patient', 'doctor', 'structured'];
 export const FORBIDDEN_SOURCES = ['query', 'gold_answer', 'answer_options', 'judge_score', 'future_session', 'derived'];
 export const OPERATIONS = ['ADD', 'UPDATE', 'SUPERSEDE', 'RESOLVE', 'CONFLICT', 'NOOP'];
@@ -73,6 +77,22 @@ export function validateStateDelta(value) {
   if (!STATE_FAMILIES.includes(value?.family)) errors.push('invalid family');
   requiredString(value, 'evidence_id', errors);
   if (errors.length) throw new SchemaError('StateDelta', errors, value);
+  return value;
+}
+
+export function validatePatientGraphEdge(value) {
+  const errors = [];
+  for (const key of ['edge_id', 'subject_id', 'from_state_id', 'to_state_id', 'edge_family', 'relation_type', 'status']) requiredString(value, key, errors);
+  if (!PATIENT_GRAPH_EDGE_FAMILIES.includes(value?.edge_family)) errors.push('invalid edge_family');
+  if (!PATIENT_GRAPH_RELATIONS.includes(value?.relation_type)) errors.push('invalid relation_type');
+  if (!PATIENT_GRAPH_EDGE_STATUSES.includes(value?.status)) errors.push('invalid edge status');
+  if (!PATIENT_GRAPH_SUPPORT_KINDS.includes(value?.support_kind)) errors.push('invalid support_kind');
+  if (value?.from_state_id === value?.to_state_id) errors.push('graph edge cannot be a self-loop');
+  if (!Array.isArray(value?.evidence_ids) || value.evidence_ids.length === 0) errors.push('graph edge requires evidence_ids');
+  if (typeof value?.confidence !== 'number' || value.confidence < 0 || value.confidence > 1) errors.push('confidence must be 0..1');
+  if (value?.persistent !== true) errors.push('patient graph edge must be persistent');
+  if (value?.causal_claim !== false) errors.push('patient graph edge cannot claim causality');
+  if (errors.length) throw new SchemaError('PatientGraphEdge', errors, value);
   return value;
 }
 

@@ -8,7 +8,7 @@ const obs=(text,source_type='patient',extra={})=>({subject_id:'p',source_type,ep
 const run=async(list)=>{const s=new Store(':memory:'),p=new Pipeline(s);let r;for(const o of list)r=await p.run(o);return{s,r}};
 const forbidden=['derived','normalization','speaker','normalized_entity','numbers','relation_hints','checkpoint','entity','relations','operation_reason','derived_from'];
 
-test('core pipeline removes linker, reconciler and validity while retaining six independent updaters',async()=>{const{s,r}=await run([obs('我付不起 copay，已经停药。')]);const names=r.traces.map(x=>x.component);for(const x of ['entity_relation_linker','temporal_reconciler','state_validity'])assert.equal(names.includes(x),false);for(const x of ['bc','pe','pa','cs','cp','lo'])assert.ok(names.includes(`updater_${x}`));assert.deepEqual(names.filter(x=>x.startsWith('updater_')),['updater_bc','updater_pe','updater_pa','updater_cs','updater_cp','updater_lo']);assert.ok(r.final.states.some(x=>x.family==='BC'));assert.ok(r.final.states.some(x=>x.family==='PE'));s.close()});
+test('core pipeline uses one Patient Graph updater with six typed node families',async()=>{const{s,r}=await run([obs('我付不起 copay，已经停药。')]);const names=r.traces.map(x=>x.component);for(const x of ['entity_relation_linker','temporal_reconciler','state_validity','updater_bc','updater_pe','updater_pa','updater_cs','updater_cp','updater_lo'])assert.equal(names.includes(x),false);assert.equal(names.filter(x=>x==='patient_graph_updater').length,1);assert.ok(r.final.states.some(x=>x.family==='BC'));assert.ok(r.final.states.some(x=>x.family==='PE'));assert.equal(r.final.patient_graph.version,'careharness-patient-graph.v1');s.close()});
 
 test('requested fields are absent from Evidence, Router, State, Delta and persisted memory',async()=>{const{s,r}=await run([obs('患者对青霉素过敏。','structured')]);assert.deepEqual(r.final.states.map(x=>x.family),['CS']);const payload={evidence:r.final.evidence,router:r.traces.find(x=>x.component==='multi_label_router').output,states:r.final.states,deltas:r.final.deltas,memory:s.statesFor('p')};const raw=JSON.stringify(payload);for(const key of forbidden)assert.equal(new RegExp(`"${key}"\\s*:`).test(raw),false,key);assert.equal(/"reason"\s*:/.test(JSON.stringify(payload.router)),false);s.close()});
 
@@ -184,3 +184,11 @@ test('self-harm disclosure, professional risk and safety plan remain PE CS CP',a
 
 test('Action Policy reads State memory directly and remains independent from Gates',()=>{const observation=obs('我不确定现在是否还需要吃药。');const action=I.actionPolicy(observation,[]);assert.equal(action.type,'ASK');assert.equal('gate'in action,false)});
 test('auditor blocks generator changing the independent Action Policy',()=>{const a={type:'ASK',forbidden_content:[]},g={action_type:'ANSWER',response:'answer',citations:[]};assert.equal(I.audit(a,g).passed,false)});
+
+test('a rolled-back Patient Graph commit is never reported as committed',async()=>{
+  const store=new Store(':memory:'),pipeline=new Pipeline(store),commit=store.commitMemory.bind(store);store.commitMemory=()=>{throw new Error('synthetic graph commit failure')};
+  await assert.rejects(()=>pipeline.run(obs('患者对青霉素过敏。','structured'),{phase:'conversation'}),/synthetic graph commit failure/);
+  const failed=store.listRuns(1)[0],runView=store.getRun(failed.id),trace=runView.traces.at(-1);
+  assert.equal(trace.component,'patient_memory_commit');assert.equal(trace.status,'failed');assert.equal(trace.output.committed,false);assert.equal(runView.error.write_progress.committed,false);assert.equal(store.statesFor('p').length,0);assert.equal(store.evidenceFor('p').length,0);
+  store.commitMemory=commit;store.close();
+});

@@ -2,17 +2,18 @@ import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { ModelGateway } from './gateway.js';
 import { aliasesIn } from './medical-terms.js';
+import { communicationActionRequirements } from './prompts.js';
 import { buildVersion } from './version.js';
-import { STATE_FAMILIES, validateAction, validateEvidence, validateObservation, validateState, validateStateDelta } from './schema.js';
+import { STATE_FAMILIES, validateAction, validateEvidence, validateObservation, validatePatientGraphEdge, validateState, validateStateDelta } from './schema.js';
 import { transcriptBlocks,transcriptContextForSpan } from './session-observation.js';
 
-const FAMILY_NAMES = { BC:'BackgroundContext', PE:'PatientExperience', PA:'PatientAppraisal', CS:'ClinicalSafety', CP:'CareProcess', LO:'LongitudinalOutcome' };
 const DESCRIPTIONS = {
   observation_ingest:'校验并固定 benchmark 共有的患者、来源、session、turn、时间与原文；query 和评分字段不会进入核心系统。',
   atomic_evidence_extractor:'在完整 Session 语境中筛选值得长期保留的事实，过滤寒暄、安慰和重复表达，再拆分并语义重写为原子 Evidence。', multi_label_router:'把每条原子事实分配给一个或多个 State family；重复 family 会被确定性去除并记录 warning。',
-  action_policy:'独立于 Gate，直接根据当前 Patient 消息和六类 State 的当前记忆选择结构化行动。',
-  response_generator:'只表达 Action Policy 已选择的行动；当前实验阶段不运行 Gate。',
-  response_auditor:'检查回复是否遵守 Action Policy 和证据边界，不读取 Gate。',
+  patient_graph_updater:'在同一张持久化 Patient Graph 中创建 BC/PE/PA/CS/CP/LO typed nodes，并写入带 Evidence、置信度和验证状态的 temporal / clinical-care edges。',
+  action_policy:'直接根据当前 Patient 消息和六类 State 的当前记忆选择结构化行动。',
+  response_generator:'只表达 Action Policy 已选择的行动，并遵守当前可见 State/Evidence 边界。',
+  response_auditor:'检查回复是否遵守 Action Policy 和证据边界。',
   memory_commit:'历史 profile/对话只更新记忆，不生成 Doctor Agent 回复。',
   patient_memory_commit:'在任何回复生成前，先提交本轮 Patient observation、Evidence 和 State；后续回复失败也不丢失患者输入。',
   conversation_commit:'提交通过 Auditor 的 Doctor Agent 回复；阶段 2 编排器随后将其作为下一条 doctor observation 写回记忆。'
@@ -64,27 +65,32 @@ export class Pipeline {
       attachRouterWarnings(routedResult);
       const routes=step('multi_label_router',routerInput,routedResult.value,'completed',routedResult.trace);
       await breakpoint();
-      const historical=this.store.statesFor(observation.subject_id);
-      const familyResults=await Promise.all(STATE_FAMILIES.map(async family=>{const input={family:FAMILY_NAMES[family],routes:routes.filter(x=>x.families.includes(family)),candidates:historical.filter(x=>x.family===family)};let result={states:[],deltas:[]};try{result=updateFamily(family,input.routes,input.candidates,observation);result.states.forEach(validateState);result.deltas.forEach(validateStateDelta);return{family,input,result,error:null};}catch(error){return{family,input,result,error};}}));
-      const built=[]; const deltas=[];
-      for (const item of familyResults) {
-        const component=`updater_${item.family.toLowerCase()}`;
-        if(item.error){const error=item.error,failure={kind:'schema_error',message:String(error.message),validation_errors:error.errors||[],suggestion:`Inspect ${FAMILY_NAMES[item.family]} routes and State value fields; value must come from the routed atomic fact.`};step(component,item.input,item.result,'failed',null,failure);throw Object.assign(error,{publicError:{step:component,input:item.input,raw_model_output:'',parsed_output:item.result,validation_errors:error.errors||[],message:String(error.message),suggestion:failure.suggestion}});}
-        built.push(...item.result.states); deltas.push(...item.result.deltas);
-        step(component,item.input,item.result);
-        await breakpoint();
-      }
+      const graphSnapshot=readPatientGraphSnapshot(this.store,observation.subject_id),historical=graphSnapshot.nodes,historicalEdges=graphSnapshot.edges;
+      const graphInput={routes,graph:{node_count:historical.length,edge_count:historicalEdges.length,typed_node_counts:familyCounts(historical)}};
+      let graphDelta;
+      try{
+        graphDelta=updatePatientGraph(routes,historical,historicalEdges,observation);
+        graphDelta.nodes.forEach(validateState);graphDelta.edges.forEach(validatePatientGraphEdge);graphDelta.deltas.forEach(validateStateDelta);
+      }catch(error){const failure={kind:'schema_error',message:String(error.message),validation_errors:error.errors||[],suggestion:'Inspect routed Evidence and Patient Graph node/edge invariants; every node and edge must remain patient-specific and Evidence-bound.'};step('patient_graph_updater',graphInput,null,'failed',null,failure);throw Object.assign(error,{publicError:{step:'patient_graph_updater',input:graphInput,raw_model_output:'',parsed_output:null,validation_errors:error.errors||[],message:String(error.message),suggestion:failure.suggestion}});}
+      const built=graphDelta.nodes,builtEdges=graphDelta.edges,deltas=graphDelta.deltas;
+      step('patient_graph_updater',graphInput,graphDelta);
+      await breakpoint();
       const memory=currentMemory([...historical,...built]);
+      const patientGraph={version:'careharness-patient-graph.v1',subject_id:observation.subject_id,node_count:historical.length+built.length,edge_count:historicalEdges.length+builtEdges.length,typed_node_counts:familyCounts([...historical,...built]),delta:{node_ids:built.map(node=>node.state_id),edge_ids:builtEdges.map(edge=>edge.edge_id)}};
       const isMock=[this.gateway,...Object.values(this.componentGateways)].every(g=>g.config.provider==='mock');
       if(phase==='memory_build'){
-        const final={phase,observation,run_context:runContext,evidence,states:built,deltas,memory,response:null,version,mock:isMock};
-        step('memory_commit',{phase,observation_id:observation.observation_id,state_delta_count:deltas.length},{committed:run.branch_kind==='formal',next:'Memory snapshot is ready for a future patient conversation.'});
-        if(run.branch_kind==='formal')this.store.commitMemory(run.id,observation,evidence,built);
+        const final={phase,observation,run_context:runContext,evidence,states:built,graph_edges:builtEdges,patient_graph:patientGraph,deltas,memory,response:null,version,mock:isMock};
+        const commitInput={phase,observation_id:observation.observation_id,node_delta_count:deltas.length,edge_delta_count:builtEdges.length};let receipt=null;
+        try{if(run.branch_kind==='formal')receipt=this.store.commitMemory(run.id,observation,evidence,built,builtEdges,{expected_graph_revision:graphSnapshot.revision});}
+        catch(error){const failure=memoryCommitFailure(error);step('memory_commit',commitInput,{committed:false},'failed',null,failure);throw Object.assign(error,{publicError:{step:'memory_commit',input:commitInput,raw_model_output:'',parsed_output:{committed:false},message:failure.message,suggestion:failure.suggestion}});}
+        step('memory_commit',commitInput,{committed:Boolean(receipt),receipt,next:'The versioned Patient Graph snapshot is ready for a future query.'});
         this.store.completeRun(run.id,final);
         return {...run,status:'completed',traces,final};
       }
-      const patientCommit=step('patient_memory_commit',{observation_id:observation.observation_id,source_type:observation.source_type,state_delta_count:deltas.length},{committed:run.branch_kind==='formal',sequence:1,next:'Action Policy reads memory after the Patient observation has been committed.'});
-      if(patientCommit.committed)this.store.commitMemory(run.id,observation,evidence,built);
+      const patientCommitInput={observation_id:observation.observation_id,source_type:observation.source_type,node_delta_count:deltas.length,edge_delta_count:builtEdges.length};let patientReceipt=null;
+      try{if(run.branch_kind==='formal')patientReceipt=this.store.commitMemory(run.id,observation,evidence,built,builtEdges,{expected_graph_revision:graphSnapshot.revision});}
+      catch(error){const failure=memoryCommitFailure(error);step('patient_memory_commit',patientCommitInput,{committed:false,sequence:1},'failed',null,failure);throw Object.assign(error,{publicError:{step:'patient_memory_commit',input:patientCommitInput,raw_model_output:'',parsed_output:{committed:false},message:failure.message,suggestion:failure.suggestion}});}
+      const patientCommit=step('patient_memory_commit',patientCommitInput,{committed:Boolean(patientReceipt),receipt:patientReceipt,sequence:1,next:'Action Policy reads the Patient Graph after the Patient observation has been committed.'});
       await breakpoint();
       const action=step('action_policy',{current_patient_message:observation.raw_text,memory:compactStates(memory)},actionPolicy(observation,memory));validateAction(action);
       await breakpoint();
@@ -97,7 +103,7 @@ export class Pipeline {
       const audited=step('response_auditor',auditorInput,auditResult.value,auditResult.value.passed?'completed':'failed',auditResult.trace);
       await breakpoint();
       if(!audited.passed)throw Object.assign(new Error('Response blocked by Auditor'),{publicError:{step:'response_auditor',input:auditorInput,raw_model_output:auditResult.trace.raw_model_response,parsed_output:audited,suggestion:'Inspect the Action Policy constraints and regenerate the response.'}});
-      const final={phase,observation,run_context:runContext,evidence,states:built,deltas,memory,patient_memory_committed:patientCommit.committed,action,response:generated.response,audit:audited,response_evidence_ids:generated.citations,version,mock:isMock};
+      const final={phase,observation,run_context:runContext,evidence,states:built,graph_edges:builtEdges,patient_graph:patientGraph,deltas,memory,patient_memory_committed:patientCommit.committed,action,response:generated.response,audit:audited,response_evidence_ids:generated.citations,version,mock:isMock};
       step('conversation_commit',{action:action.type,response:generated.response,branch_kind:run.branch_kind},{response_ready:true,doctor_memory_pending:run.branch_kind==='formal',sequence:2});
       this.store.completeRun(run.id,final);
       return {...run,status:'completed',traces,final};
@@ -530,15 +536,91 @@ function routeEvidence(evidence,o){return evidence.map((e,index)=>{
   return{...e,id:String(index),families};
 });}
 
-function updateFamily(family,routes,historical,o){const states=[],deltas=[]; for(const r of routes){if(r.families.includes(family)){const owned=[...historical,...states],prior=[...owned].reverse().find(x=>sameMemoryTopic(x,r));let operation='ADD';
-    const correction=/纠正|更正|不是.*而是|actually|correction/i.test(r.text);if(prior){if(correction&&prior.source_type===r.source_type)operation='SUPERSEDE';else if(prior.source_type!==r.source_type&&opposite(prior.value,r.text))operation='CONFLICT';else operation='UPDATE';}
-    const state={state_id:randomUUID(),subject_id:o.subject_id,family,value:r.text,status:operation==='CONFLICT'?'conflict':'active',source_type:r.source_type,event_time:r.event_time,episode_id:r.episode_id,source_session_id:r.source_session_id||r.episode_id,turn_id:r.turn_id,certainty:r.certainty,polarity:r.polarity,evidence_ids:[r.evidence_id],version:(prior?.version||0)+1,version_chain:[...(prior?.version_chain||[]),...(prior?[prior.state_id]:[])],supersedes:operation==='SUPERSEDE'?prior.state_id:null,conflicts_with:operation==='CONFLICT'?prior?.state_id||null:null,operation};states.push(state);deltas.push({operation,family,state_id:state.state_id,prior_state_id:prior?.state_id||null,evidence_id:r.evidence_id});
-  }} return {states,deltas};}
+function updatePatientGraph(routes,historicalNodes,historicalEdges,o){
+  const nodes=[],deltas=[];
+  for(const family of STATE_FAMILIES)for(const route of routes.filter(item=>item.families.includes(family))){
+    const factorKey=memoryTopicKey(route.text),owned=[...historicalNodes,...nodes].filter(node=>node.family===family&&stateFactorKey(node)===factorKey),ordered=[...owned].sort(compareGraphChronology),newOrder=graphEventOrder(route),prior=Number.isFinite(newOrder)?[...ordered].reverse().find(node=>graphEventOrder(node)<=newOrder):ordered.at(-1),successor=Number.isFinite(newOrder)?ordered.find(node=>graphEventOrder(node)>newOrder):null;let operation='ADD';
+    const correction=/纠正|更正|不是.*而是|actually|correction/i.test(route.text);
+    if(prior){
+      if(prior.status==='conflict')operation=correction||explicitConflictReconciliation(route.text)?'RESOLVE':'CONFLICT';
+      else if(correction&&prior.source_type===route.source_type)operation='SUPERSEDE';
+      else if(prior.source_type!==route.source_type&&opposite(prior.value,route.text))operation='CONFLICT';
+      else if(resolvesPrior(prior,route))operation='RESOLVE';
+      else if(equivalentStateFact(prior,route))operation='NOOP';
+      else operation='UPDATE';
+    }
+    const conflictTarget=operation==='CONFLICT'?(prior?.status==='conflict'?prior.conflicts_with||prior.state_id:prior?.state_id||null):null;
+    const state={state_id:randomUUID(),subject_id:o.subject_id,family,factor_key:factorKey,factor_domains:factorDomains(family,route.text),value:route.text,status:operation==='CONFLICT'?'conflict':operation==='RESOLVE'?'resolved':'active',source_type:route.source_type,event_time:route.event_time,valid_from:route.event_time||null,episode_id:route.episode_id,source_session_id:route.source_session_id||route.episode_id,turn_id:route.turn_id,certainty:route.certainty,polarity:route.polarity,evidence_ids:[route.evidence_id],version:Math.max(0,...owned.map(item=>Number(item.version)||0))+1,version_chain:[...(prior?.version_chain||[]),...(prior?[prior.state_id]:[])],predecessor_state_id:prior?.state_id||null,successor_state_id:successor?.state_id||null,supersedes:operation==='SUPERSEDE'?prior.state_id:null,conflicts_with:conflictTarget,resolves:operation==='RESOLVE'?prior?.state_id||null:null,operation};
+    nodes.push(state);deltas.push({operation,family,state_id:state.state_id,prior_state_id:prior?.state_id||null,evidence_id:route.evidence_id});
+  }
+  return{version:'patient-graph-updater.v1',nodes,edges:buildPersistentGraphEdges(nodes,historicalNodes,historicalEdges),deltas,typed_node_counts:familyCounts(nodes)};
+}
+
+function buildPersistentGraphEdges(nodes,historicalNodes,historicalEdges){
+  const edges=[],known=new Set(historicalEdges.map(edge=>graphEdgeKey(edge))),nodeById=new Map([...historicalNodes,...nodes].map(node=>[String(node.state_id),node]));
+  const add=({from,to,edge_family,relation_type,evidence_ids,status='verified',confidence=1,support_kind='structural',source})=>{
+    if(!from||!to||from===to||!nodeById.has(String(from))||!nodeById.has(String(to)))return;
+    const evidenceIds=[...new Set((evidence_ids||[]).filter(Boolean).map(String))];if(!evidenceIds.length)return;
+    const candidate={edge_id:randomUUID(),subject_id:nodeById.get(String(from)).subject_id,from_state_id:String(from),to_state_id:String(to),edge_family,relation_type,evidence_ids:evidenceIds,confidence:Math.max(0,Math.min(1,Number(confidence)||0)),support_kind,status,verified:status==='verified',persistent:true,causal_claim:false,source,created_episode_id:nodeById.get(String(to)).episode_id||null};
+    const key=graphEdgeKey(candidate);if(known.has(key))return;known.add(key);edges.push(candidate);
+  };
+  for(const node of nodes){
+    const priorId=node.operation==='CONFLICT'?node.conflicts_with:node.predecessor_state_id||node.supersedes||node.resolves||(node.version_chain||[]).at(-1),prior=nodeById.get(String(priorId||''));
+    if(prior){
+      const base={evidence_ids:[...(prior.evidence_ids||[]),...(node.evidence_ids||[])],edge_family:'temporal',confidence:1,support_kind:'structural',source:'version_transition'};
+      if(node.operation==='SUPERSEDE')add({...base,from:node.state_id,to:prior.state_id,relation_type:'supersedes'});
+      else if(node.operation==='CONFLICT')add({...base,from:node.state_id,to:prior.state_id,relation_type:'conflicts'});
+      else if(node.operation==='RESOLVE')add({...base,from:node.state_id,to:prior.state_id,relation_type:'resolves'});
+      else if(node.operation==='NOOP')add({...base,from:prior.state_id,to:node.state_id,relation_type:'persists'});
+      else add({...base,from:prior.state_id,to:node.state_id,relation_type:'updates'});
+    }
+    const successor=nodeById.get(String(node.successor_state_id||''));
+    if(successor&&node.status!=='conflict'&&successor.status!=='conflict')add({from:node.state_id,to:successor.state_id,edge_family:'temporal',relation_type:'updates',evidence_ids:[...(node.evidence_ids||[]),...(successor.evidence_ids||[])],confidence:1,support_kind:'structural',source:'backfill_successor_transition'});
+  }
+  const byEvidence=new Map();for(const node of nodes)for(const evidenceId of node.evidence_ids||[]){const group=byEvidence.get(String(evidenceId))||[];group.push(node);byEvidence.set(String(evidenceId),group);}
+  const order=new Map(STATE_FAMILIES.map((family,index)=>[family,index]));
+  for(const[evidenceId,group]of byEvidence){
+    const sorted=[...group].sort((a,b)=>order.get(a.family)-order.get(b.family));
+    for(let left=0;left<sorted.length;left++)for(let right=left+1;right<sorted.length;right++){
+      const from=sorted[left],to=sorted[right];let relation_type='informs';
+      if(to.family==='CP'&&from.family==='BC')relation_type='constrains';
+      else if(to.family==='CP'&&from.family==='PA')relation_type='motivates';
+      else if(from.family==='CP'&&to.family==='LO'&&/(?:后|随后|之后|after|following)/i.test(to.value))relation_type='followed_by';
+      else if(to.family==='LO'&&/(?:导致|促成|because|caused|due to)/i.test(to.value))relation_type='contributes_to';
+      const asserted=relationExplicitlyAsserted(relation_type,`${from.value} ${to.value}`);
+      add({from:from.state_id,to:to.state_id,edge_family:'clinical_care',relation_type,evidence_ids:[evidenceId],confidence:asserted?.confidence??.35,support_kind:asserted?'asserted':'hypothesized',status:'candidate',source:asserted?'unverified_explicit_relation_candidate':'shared_atomic_evidence_candidate'});
+    }
+  }
+  for(const node of nodes){
+    if(node.family!=='LO')continue;const currentOrder=graphEventOrder(node);if(!Number.isFinite(currentOrder))continue;
+    const prior=[...historicalNodes].reverse().find(item=>item.family==='CP'&&sameMemoryTopic(item,node)&&Number.isFinite(graphEventOrder(item))&&graphEventOrder(item)<currentOrder);if(!prior)continue;
+    add({from:prior.state_id,to:node.state_id,edge_family:'clinical_care',relation_type:'followed_by',evidence_ids:[...(prior.evidence_ids||[]),...(node.evidence_ids||[])],confidence:.55,support_kind:'hypothesized',status:'candidate',source:'time_ordered_same_factor_candidate'});
+  }
+  return edges;
+}
+function graphEdgeKey(edge){return[edge.from_state_id,edge.to_state_id,edge.edge_family,edge.relation_type].map(String).join('\u0000');}
+function familyCounts(nodes){return Object.fromEntries(STATE_FAMILIES.map(family=>[family,nodes.filter(node=>node.family===family).length]));}
+function relationExplicitlyAsserted(type,text){
+  if(type==='followed_by'&&/(?:之后|随后|以后|服用后|治疗后|after|following|subsequent)/i.test(text))return{confidence:.95};
+  if(type==='constrains'&&/(?:限制|无法|不能|妨碍|阻止|因为.{0,30}(?:无法|不能)|prevent|constrain|unable to|cannot|because.{0,40}(?:cannot|unable))/i.test(text))return{confidence:.9};
+  if(type==='motivates'&&/(?:因此|所以|促使|出于.{0,30}(?:希望|偏好)|therefore|motivated|because.{0,30}(?:prefer|want|goal))/i.test(text))return{confidence:.85};
+  return null;
+}
+function factorDomains(family,text){
+  const value=String(text||''),domains=new Set(),biological=/病史|疾病|诊断|确诊|过敏|症状|疼|血糖|血压|检查|检验|化验|体重|medical history|disease|diagnos|allerg|symptom|pain|glucose|blood pressure|test result|weight/i.test(value),behavioral=/服药|用药|监测|饮食|运动|依从|漏服|停药|睡眠习惯|adher|taking|monitor|diet|exercise|sleep habit/i.test(value),social=/工作|家庭|照护者|经济|费用|住房|交通|支持|职业|保险|work|family|caregiver|financial|cost|housing|transport|support|occupation|insurance/i.test(value),psychological=/焦虑|担心|抑郁|情绪|害怕|偏好|目标|意愿|认为|anxi|worr|depress|fear|prefer|goal|willing|belie/i.test(value);
+  if(['CS','LO'].includes(family)||biological)domains.add('biological');
+  if(family==='PA'||psychological)domains.add('psychological');
+  if(behavioral)domains.add('behavioral');
+  if(social)domains.add('social');
+  if(family==='CP')domains.add('care');
+  if(!domains.size)domains.add(family==='BC'?'social':family==='PE'?'biological':family==='PA'?'psychological':family==='CP'?'care':'biological');
+  return[...domains];
+}
+function graphEventOrder(node){const parsed=Date.parse(node?.event_time||'');if(Number.isFinite(parsed))return parsed;const match=/(?:session|episode|admission|encounter)-(\d+)/i.exec(node?.episode_id||'');return match?Number(match[1]):NaN;}
+function compareGraphChronology(a,b){const left=graphEventOrder(a),right=graphEventOrder(b);if(Number.isFinite(left)&&Number.isFinite(right)&&left!==right)return left-right;if(Number.isFinite(left)!==Number.isFinite(right))return Number.isFinite(left)?1:-1;return(Number(a?.version)||0)-(Number(b?.version)||0);}
 function hasNumber(x){return /\d/.test(String(x||''));} function opposite(a,b){return /(stop|停|未|没有|否认|not|no )/i.test(a)!==/(stop|停|未|没有|否认|not|no )/i.test(b);}
 function sameMemoryTopic(a,b){
-  const ta=topicTokens(a.value),tb=topicTokens(b.text||b.value),medicationsA=ta.filter(isMedicationTopic),medicationsB=tb.filter(isMedicationTopic);
-  if(medicationsA.length||medicationsB.length)return medicationsA.length>0&&medicationsB.length>0&&medicationsA.some(token=>medicationsB.includes(token));
-  return ta.length&&tb.length?ta.some(x=>tb.includes(x)):normalizeTopic(a.value)===normalizeTopic(b.text||b.value);
+  return stateFactorKey(a)===memoryTopicKey(b.text||b.value);
 }
 function topicTokens(text){
   const value=String(text),medications=medicationTopicTokens(value),rules=[['self_harm',/自伤|自杀|轻生|self[- ]?harm|suicid/i],['medication',/服药|用药|吃药|停药|停用|停服|漏服|漏药|medication|medicine|taking|stopped|discontinued/i],['nausea',/恶心|nause/i],['anxiety',/焦虑|紧张|anxi/i],['sleep',/睡眠|失眠|sleep/i],['glucose',/血糖|glucose/i],['uacr',/UACR/i],['cost',/copay|付不起|费用|保险/i],['followup',/复诊|随访|follow.?up/i]];
@@ -560,14 +642,45 @@ function medicationTopicTokens(text){
 }
 function isMedicationTopic(token){return String(token).startsWith('medication:');}
 function normalizeTopic(text){return String(text||'').toLowerCase().replace(/患者|医生|记录|目前|最近|现在|[\s\p{P}\d]/gu,'');}
-function memoryTopicKey(text){const tokens=topicTokens(text),medications=tokens.filter(isMedicationTopic);return(medications.length?medications:tokens).join(',')||normalizeTopic(text);}
-function currentMemory(states){const latest=new Map();for(const state of states)latest.set(`${state.family}|${memoryTopicKey(state.value)}`,state);return [...latest.values()];}
+function memoryTopicKey(text){const value=String(text||''),tokens=topicTokens(value),medications=tokens.filter(isMedicationTopic);if(medications.length)return medications.join(',');const refined=tokens.map(token=>token==='glucose'?`glucose:${/空腹|fasting/i.test(value)?'fasting':/餐后|post.?prandial/i.test(value)?'postprandial':/糖化|hba1c/i.test(value)?'hba1c':'general'}`:token);return refined.join(',')||normalizeTopic(value);}
+function stateFactorKey(state){return String(state?.factor_key||memoryTopicKey(state?.value||''));}
+function normalizeFactAssertion(text){
+  return String(text||'').normalize('NFKC').toLowerCase()
+    .replace(/患者|医生|记录|目前|最近|现在/gu,'')
+    .replace(/\b(?:patient|doctor|currently|current|recently|now)\b/gu,'')
+    .replace(/[\s\p{P}\p{S}]/gu,'');
+}
+function quantitativeFactSignature(text){
+  return [...String(text||'').normalize('NFKC').toLowerCase().matchAll(/[-+]?(?:\d+(?:\.\d+)?|\.\d+)\s*(?:%|mg|mcg|g|kg|ml|l|mmol\/?l|mg\/?dl|mmhg|bpm|iu|u|单位|毫克|微克|克|千克|毫升|升)?/giu)]
+    .map(match=>match[0].replace(/\s+/gu,'')).join('|');
+}
+function medicationStatusSignature(text){
+  const value=String(text||'').normalize('NFKC').toLowerCase(),statuses=[];
+  const add=status=>{if(!statuses.includes(status))statuses.push(status);};
+  if(/(?:正在|当前|目前).{0,8}(?:服用|使用)|\b(?:taking|currently using)\b/iu.test(value))add('taking');
+  if(/停用|停服|停药|停止.{0,6}(?:服用|使用)|\b(?:stopped|discontinued|ceased)\b/iu.test(value))add('stopped');
+  if(/漏服|漏药|未按时|\bmissed (?:a )?dose\b/iu.test(value))add('missed');
+  if(/重启|重新开始|恢复.{0,6}(?:服用|使用)|\b(?:restarted|resumed)\b/iu.test(value))add('restarted');
+  return statuses.sort().join('|');
+}
+function equivalentStateFact(prior,next){
+  const left=String(prior?.value||''),right=String(next?.text||next?.value||'');
+  return String(prior?.polarity||'affirmed')===String(next?.polarity||'affirmed')
+    &&normalizeFactAssertion(left)===normalizeFactAssertion(right)
+    &&quantitativeFactSignature(left)===quantitativeFactSignature(right)
+    &&medicationStatusSignature(left)===medicationStatusSignature(right);
+}
+function explicitConflictReconciliation(text){return/(?:经|已)?(?:核实|核对|复核)(?:后)?(?:确认|证实)|双方(?:已经)?确认|冲突(?:已经)?(?:澄清|解决)|reconcil(?:ed|iation)|clarif(?:ied|ication)|(?:verified|confirmed) after (?:review|checking)/iu.test(String(text||''));}
+function resolvesPrior(prior,next){return prior?.polarity!=='negated'&&(next?.polarity==='negated'||/(?:已|已经|目前)?(?:缓解|消失|恢复|解决|不再|没有)|resolved|no longer|went away/i.test(next?.text||next?.value||''));}
+function currentMemory(states){const latest=new Map();for(const state of states){const key=`${state.family}|${stateFactorKey(state)}`,prior=latest.get(key);if(!prior||compareGraphChronology(prior,state)<=0)latest.set(key,state);}return [...latest.values()];}
 
-function actionPolicy(observation,states){const conflict=states.some(x=>x.status==='conflict');const riskPattern=/自伤|自杀|轻生|具体计划|可用手段|self[- ]?harm|suicid/i,currentRisk=riskPattern.test(observation.raw_text),rememberedRisk=states.some(s=>s.family==='PE'&&riskPattern.test(s.value)&&s.polarity!=='negated');let type='ANSWER',explanation='Answer from the current message and the current memory maintained by each State family.';if(currentRisk){type='ESCALATE';explanation='The current Patient message contains a safety disclosure; Action Policy escalates without relying on a Gate.';}else if(conflict){type='VERIFY';explanation='A State family has an unresolved cross-source conflict that must be verified.';}else if(/不确定|不清楚|maybe|might/i.test(observation.raw_text)){type='ASK';explanation='The current Patient message is explicitly uncertain, so clarification is required.';}const ids=[...new Set(states.flatMap(s=>s.evidence_ids||[]))];return{type,explanation,required_evidence_ids:ids,required_content:type==='ESCALATE'?['明确建议立即联系当地急救/危机支持或可信任的人','直接询问当前安全、计划与手段可及性']:type==='VERIFY'?['说明需要核对的冲突信息']:type==='ASK'?['提出一个澄清问题']:['回应当前患者信息，并仅使用可追溯记忆'],forbidden_content:['编造诊断','泄露密钥',...(rememberedRisk&&!currentRisk?['把历史风险直接说成当前风险']:[])]};}
+function actionPolicy(observation,states){const conflict=states.some(x=>x.status==='conflict'),riskPattern=/自伤|自杀|轻生|具体计划|可用手段|self[- ]?harm|suicid/i,currentRisk=riskPattern.test(observation.raw_text),rememberedRisk=states.some(s=>s.family==='PE'&&riskPattern.test(s.value)&&s.polarity!=='negated');let type='ANSWER';if(currentRisk)type='ESCALATE';else if(conflict)type='VERIFY';else if(/不确定|不清楚|maybe|might/i.test(observation.raw_text))type='ASK';const ids=[...new Set(states.flatMap(s=>s.evidence_ids||[]))],requirements=communicationActionRequirements(type,{rememberedRisk,currentRisk});return{type,explanation:requirements.explanation,required_evidence_ids:ids,required_content:requirements.required_content,forbidden_content:requirements.forbidden_content};}
 function validateGenerated(x){if(!x||typeof x.response!=='string'||!x.response.trim())throw new Error('generated response required');if(!x.action_type)throw new Error('action_type required');return x;}
 function generateFromMemory(action,input){const response={ESCALATE:'你现在的安全最重要。请立即联系当地急救或危机支持，并尽快让一位可信任的人陪在你身边。你现在是否安全？是否有具体计划、可用手段或马上行动的可能？',VERIFY:'现有记忆中有冲突或时间不清。我们先核对具体来源和发生时间，再继续会更可靠。',ASK:'我想先确认一个关键信息：你说的不确定部分具体发生在什么时候，现在仍然如此吗？',ANSWER:input.memory.length?'我记得你之前提供的信息。结合你刚才说的内容，我们可以继续围绕当前变化和下一步安排来谈。':'我听到了你刚才说的内容。我们可以先从你现在最希望解决的部分开始。',REFUSE:'这个请求超出当前可安全处理的范围。'}[action.type]||'我听到了你刚才说的内容。';return{action_type:action.type,response,citations:action.required_evidence_ids};}
 function validateAudit(x){if(typeof x?.passed!=='boolean'||!Array.isArray(x?.violations))throw new Error('invalid AuditResult');return x;}
 function audit(action,g){const v=[];if(g.action_type!==action.type)v.push('Generator changed the Action Policy decision.');for(const x of action.forbidden_content)if(x&&g.response.includes(x))v.push(`Response includes forbidden content: ${x}`);if(action.type==='ESCALATE'&&!/急救|危机|emergency|crisis/i.test(g.response))v.push('Action Policy requires escalation language.');return{passed:v.length===0,violations:v,grounded_evidence_ids:g.citations||[],blocked_response:v.length?g.response:null,safe_response:v.length?'系统已阻止不符合 Action Policy 的回复。':g.response};}
 function diff(a,b){const aa=JSON.stringify(a)??'null',bb=JSON.stringify(b)??'null';return {changed:aa!==bb,input_bytes:aa.length,output_bytes:bb.length,summary:aa===bb?'No structured change.':'Output produced or transformed fields; inspect raw JSON for exact values.'};}
+function readPatientGraphSnapshot(store,subjectId){for(let attempt=0;attempt<3;attempt++){const before=store.graphRevisionFor(subjectId),nodes=store.graphNodesFor(subjectId),edges=store.graphEdgesFor(subjectId),after=store.graphRevisionFor(subjectId);if(before===after)return{revision:after,nodes,edges};}throw new Error(`Patient Graph for ${subjectId} changed repeatedly while being read; retry the observation`);}
+function memoryCommitFailure(error){return{kind:/changed concurrently/i.test(String(error?.message||''))?'graph_revision_conflict':'memory_commit_error',message:String(error?.message||error),suggestion:/changed concurrently/i.test(String(error?.message||''))?'Retry this observation so graph versioning is recomputed from the latest patient revision.':'The Patient Graph transaction rolled back. Inspect node, edge, Evidence, and database constraints before retrying; no successful commit is claimed.'};}
 
-export const pipelineInternals={extractEvidence,normalizeEvidenceOutput,normalizeRoutesOutput,validateRoutes,locateContiguousQuote,routeEvidence,updateFamily,currentMemory,actionPolicy,generateFromMemory,audit};
+export const pipelineInternals={extractEvidence,normalizeEvidenceOutput,normalizeRoutesOutput,validateRoutes,locateContiguousQuote,routeEvidence,updatePatientGraph,currentMemory,actionPolicy,generateFromMemory,audit};

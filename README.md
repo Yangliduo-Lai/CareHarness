@@ -1,116 +1,187 @@
-# CareHarness Studio
+# CareHarness Studio 运行说明
 
-CareHarness is a local-first, runnable implementation of the Six-State longitudinal method:
+本说明只介绍如何运行 **MedMemoryBench · dev · Persona 1 · Clean · 97 题**，以及运行后在哪里查看结果。
 
-The current lifecycle has two explicit stages. Memory build groups historical Profile/Patient/Doctor records by Session, sends each complete role-attributed Session to the Evidence Extractor once, and writes only durable patient-specific or actionable information into six independently maintained State families. Conversation still ingests a new Patient message immediately, updates those memories, runs an independent Action Policy, generates and audits the Doctor Agent response, then writes that sent response back as a Doctor observation for the next turn. The core conversation Policy remains independent; benchmark answering additionally offers three query-time decision gates for controlled ablation.
-
-The core pipeline never accepts benchmark query, gold answer, answer options, judge scores, future sessions, or benchmark-generated summaries as observations. Five adapters keep benchmark protocol fields outside the core; four are exposed in the current Studio.
-
-## Requirements and start
-
-- Node.js 22.5 or newer (tested with Node 26)
-- The local benchmark directories supplied with this project, or set `CAREHARNESS_DATA_ROOT`
+## 1. 准备代码和 Node.js
 
 ```bash
-cp .env.example .env        # optional; never commit real keys
-npm start
+git clone --branch feature/careharness-implementation git@github.com:Yangliduo-Lai/CareHarness.git
+cd CareHarness
+node --version
 ```
 
-Open <http://127.0.0.1:8766>. No npm install is required; the server, SQLite binding, frontend, and tests use Node built-ins. To use another port temporarily, run `PORT=9000 npm start`.
+需要 Node.js `22.9` 或更高版本。项目使用 Node 内置模块，通常不需要执行 `npm install`。
 
-### 前端快捷重启
+## 2. 准备 MedMemoryBench 数据
 
-在项目根目录执行以下命令，可停止当前占用 `8766` 端口的服务并重新启动前端：
+数据集不会随 Git 仓库上传。请确认本地至少存在：
 
-```bash
-lsof -ti tcp:8766 | xargs kill 2>/dev/null || true; npm start
+```text
+<DATA_ROOT>/MedMemoryBench/data/MedMemoryBench/persona_1/eval/
+  generated_dialogues.json
+  generated_queries.json
 ```
 
-To use a real model, open **模型与 Provider** and choose OpenAI, DashScope, DeepSeek, OpenRouter, or a custom OpenAI-compatible endpoint. The DashScope preset uses the official Beijing endpoint `https://dashscope.aliyuncs.com/compatible-mode/v1`; selecting the preset does not change an existing provider assignment automatically. You may paste the API key directly into the page: the browser sends it once to the local backend, which keeps it only in process memory. It is never written to SQLite, logs, traces, exports, or browser storage, and must be entered again after a server restart. A server environment-variable reference remains available as an alternative.
-
-## Test and smoke
+可以用下面的命令检查路径：
 
 ```bash
-npm test
+test -f "<DATA_ROOT>/MedMemoryBench/data/MedMemoryBench/persona_1/eval/generated_dialogues.json"
+test -f "<DATA_ROOT>/MedMemoryBench/data/MedMemoryBench/persona_1/eval/generated_queries.json"
+```
+
+复制环境变量模板：
+
+```bash
+cp .env.example .env
+```
+
+编辑 `.env`：
+
+```dotenv
+PORT=8766
+CAREHARNESS_DATA_ROOT=<DATA_ROOT>
+CAREHARNESS_DB_PATH=./data/careharness.sqlite
+OPENAI_API_KEY=
+CAREHARNESS_MATCHED_API_KEY=
+```
+
+不要把真实 API Key、`.env`、本地 SQLite 或 benchmark 数据提交到 Git。
+
+## 3. 运行检查并启动服务
+
+先运行核心测试和 smoke test：
+
+```bash
+npm run test:core
 npm run smoke
 ```
 
-The smoke command runs one core observation plus one real local protocol sample from each installed adapter using the clearly labeled offline mock provider. CPCD-Bench correctly leaves rubric scoring unavailable under Offline Mock instead of inventing an official Judge result. Mock output validates protocol wiring, persistence, and drill-down, but is not a real benchmark score.
+`test:core` 不要求安装全部 benchmark 数据集。`smoke` 会跳过本地未安装的数据集。只有安装了全部 benchmark corpus 时才需要运行完整的 `npm test`。
 
-## Guide for a user who does not read code
+启动服务：
 
-1. Open **模型与 Provider**. Keep Offline Mock for an offline demo, or choose a provider and enter the model plus API key. **测试当前表单** performs both model listing and a minimal JSON inference. Save it, then assign it globally or to individual Pipeline components. Benchmark answering keeps the original `judge` assignment and JSON transport; `judge.task-contract.v4` additionally defines how enabled decision-gate output constrains the final answer. The MedMemory Official Judge remains scoring-only and sees the frozen answer plus benchmark references only afterward.
-2. Open **两阶段调试器**. In Stage 1, enter historical Profile/Patient/Doctor records, choose **从空记忆开始** for an isolated test or **沿用该患者现有记忆**, then choose either **一步构建全部历史记忆** or **阶段 1 分段断点测试**. Records sharing a subject and episode are assembled into one complete Session transcript with explicit Turn/Role/Time headers before extraction. You can also clear only that patient's State memory while retaining Runs and traces. Stage 1 pauses after every actual component and between complete Sessions. Stage 2 offers the same run-through/breakpoint choice for the new Patient–Doctor Agent conversation. Continuation preserves the in-process execution context, so completed model calls are not repeated or billed again.
-3. Open **State Explorer** to inspect six families, evidence spans, source, episode, confidence, update operation, and version chain. The risk row keeps PE disclosure, CS professional assessment, and CP safety plan separate.
-4. Open **Action Policy** to inspect the core conversation Policy's plain-language reason for ASK, VERIFY, ESCALATE, or ANSWER. This page remains separate from the three optional query-time decision gates in benchmark experiments.
-5. Open one of the four visible benchmark labs. Preview the real visible boundary before starting. MedMemoryBench accepts an exact start Session and Session count. A window beginning after Session 1 requires a compatible checkpoint for the preceding Session; restoring it deletes active State and later checkpoints from the selected start onward before rebuilding the requested window. MedMemoryBench and MedLoCoMo both expose a separate **直接用当前 State 答题并评分** action: it validates and freezes the currently persisted memory, skips State construction, and never mutates the State store. MedLoCoMo accepts this mode only when the snapshot exactly matches a successful complete all-Admission build for that patient. Results link to the full core run trace. Mock experiments carry a warning and must not be reported as official scores.
-6. Open **Runs & Errors** to download a secret-free replay bundle. If a run fails, the page shows the exact step, input, raw response, parsed output, validation errors, and a suggested next action.
+```bash
+npm start
+```
 
-## Data boundaries and verified differences
+浏览器打开：
 
-- MedMemoryBench: official `messages` are assembled into one role-attributed observation per complete dated Session; `knowledge_points` and `source_key_points` remain reference-only. The harness builds one Session, answers every query attached to that Session, and only then starts preprocessing and building the next Session. Gold answers, answer explanations, trap design, required patient information, and common-wrong-answer metadata remain isolated in the post-answer evaluator and cannot enter State construction, planning, retrieval, selection, or answer generation.
-- MedLoCoMo: one patient is one formal sample, so every run builds every admission in chronological `combined_conversation.json` order. The `mode` and optional question-type controls filter only `benchmark_qa.json` questions (`single_admission`, `cross_admission`, or both); they never truncate the patient timeline. Admission and patient summaries remain inspection-only.
-- MusPsy: `train/task1.json`, `task2.json`, and `task3.json` define executable boundaries beyond the brief README. Task 3 Last Memory is benchmark protocol context, not a Patient quote or a new observation.
-- MediLongChat: every run builds all encounters for one patient. The current public repository snapshot contains `dataset.json` but not the paper's IDR/CDR/SR task annotations, so Studio questions are deterministic corpus-derived diagnostics. Their F1/BLEU-1/accuracy are explicitly marked `public_release_derived` and must not be compared with the paper's Table 6.
-- CPCD-Bench: every run builds the selected case's complete released consultation history and executes the official 159-task SR/MR/TCR protocol. The answer model cannot see reference answers or evaluation focus. After the answer is frozen, the independent CPCD Judge applies the repository rubric; SR uses 1–5 dimensions, while MR/TCR use 0–5 dimensions. Offline Mock never fabricates these scores.
+<http://127.0.0.1:8766>
 
-## One prompt editing surface
+也可以检查后端是否正常：
 
-All model-facing prompt text is defined in `src/prompts.js`. `PROMPTS` contains the shared Extractor, Router, Query Planner, benchmark-answer shell, official scoring-Judge contracts, and other pipeline prompts. `BENCHMARK_ANSWER_PROMPTS` contains explicit answer contracts for MedMemoryBench, MedLoCoMo, MusPsy, MediLongChat, and CPCD-Bench. The same file contains the MedMemoryBench, MedLoCoMo, and CPCD-Bench post-answer Judge templates. Benchmark adapters select the applicable contract; they do not keep model-facing prompt prose.
+```bash
+curl http://127.0.0.1:8766/api/health
+curl http://127.0.0.1:8766/api/catalog
+```
 
-Changing an answer requirement therefore means editing the matching entry in `src/prompts.js`; every adapter and experiment reads it through `benchmarkAnswerContract(...)`. Dataset-provided questions and protocol instructions remain dataset content rather than duplicated prompt definitions. Scoring algorithms, metric mappings, output validation, and hidden-reference isolation remain outside the prompt registry and are not changed by editing its wording.
+## 4. 在前端配置模型
 
-## Benchmark query retrieval
+1. 打开 **模型与 Provider**。
+2. 选择 Provider，填写模型名称和 API Key，Temperature 设置为 `0`。
+3. 点击 **测试当前表单**。
+4. 测试成功后点击 **保存连接**。
+5. 在 **实际模型分配** 中确认以下组件已有可用连接：
+   - Query Planner
+   - Benchmark Answer（`judge`）
+   - MedMemory Official Judge（`scoring_judge`）
+   - Evidence Extractor（需要新建 Patient Graph 时使用）
+   - State Router（需要新建 Patient Graph 时使用）
+6. 点击 **保存并立即应用**。
 
-Benchmark answering now uses query planning followed by one candidate-retrieval stage. The Query Planner receives only the untouched question text and produces a structured plan containing intent, target, answer slot, keywords, soft State-family scopes, temporal operator, evidence facets, answer options, and answer format. Older `{"keywords":[...]}` planner output is still accepted; deterministic query analysis supplies missing safety scopes and is the full fallback for Offline Mock or planner failure.
+正式 97 题运行不能使用 Offline Mock。前端输入的 Key 只保存在当前后端进程内存中，服务重启后需要重新填写并测试。
 
-Candidate retrieval scores every visible State with several independent recall channels: direct terms, medical aliases, Chinese lexical n-grams, linked Evidence text, task-aware family priors, evidence facets, and answer-option matches. Scope is a soft prior rather than a filter, so a planner family mistake cannot hide all other families. When one Evidence produces States in several families, provenance-aware round-robin scheduling prevents that shared Evidence from consuming the candidate budget while keeping the original States auditable. Candidate caps and reducers depend on the task: temporal questions preserve chronological ordering, current-state questions expand the version chain, multiple-choice questions balance candidates per option, and clinical inference questions diversify across families and facets. Every candidate within the task-aware safety cap is passed directly to the answer model; no second State-selection model is called.
+## 5. 在前端运行 Persona 1 / Clean / 97 题
 
-Every benchmark query now always runs the standalone **Evidence Index Gate** in `src/evidence-index-gate.js`; there is no UI or API option that can disable it. The gate indexes only query-visible State/Evidence by time, family, episode, entity/topic, provenance, and State-version relations; constructs a typed query-specific evidence chain; checks a task profile for uncovered evidence facets; and performs a bounded second-pass lookup before the complete task-capped candidate set is sent to the answer model. The gate is recall-first and fail-open: it unions indexed anchors with the ordinary hybrid signals rather than treating a planner scope as a hard exclusion. No Gold answer, official Judge metadata, or reference key point is accepted by this module.
+打开左侧 **MedMemoryBench**，在 **CareHarness-first · Static CareHarness 运行控制台** 中使用以下配置：
 
-After retrieval, `src/decision-gates.js` can run three independently selectable deterministic gates. Clinical Need & Safety reads CS/PE first and BC/LO/CP as support; Understanding & Clarification reads PA first and PE/CS/LO as support; Preference & Feasibility reads PA/BC first and CP/PE/LO as support, but may rank only options allowed by the Clinical gate. Their structured output retains State/Evidence IDs and is inserted into the answer-model input in the fixed order clinical safety → understanding/clarification → preference/feasibility. A clinical `must_escalate` or hard constraint cannot be overridden downstream. These gates do not create State and do not call another model.
-
-The experiment trace records candidate scores and recall channels, evidence-index buckets/chains/coverage and second-pass repairs, optional decision-gate inputs and outputs, the complete capped candidate State/Evidence context sent directly to the answer model, missing facets and evidence IDs, and family/option distributions. There is no post-retrieval State Selector or rerank stage: every candidate that survives the task-aware safety cap is passed through. Summaries report evidence coverage, second-pass usage, and per-decision-gate query counts. If any Session visible to a query failed or was not attempted during memory construction, that query is marked `memory_incomplete` and answer generation/scoring is skipped instead of reporting a misleading wrong answer.
-
-For MedMemoryBench, every query carries its own Session visibility boundary. A Session 10 query runs immediately after the Session 10 checkpoint and can read only State from the prefix through Session 10; Session 11 is not even preprocessed until those queries finish. Clean runs likewise cannot retrieve Noise episodes.
-
-MedMemoryBench also has a scoring-only current-memory mode. At launch it freezes the current State and only the Evidence referenced by those States, records a SHA-256 snapshot fingerprint, then runs the unchanged Query Planner, mandatory Evidence Index Gate, any selected decision gates, candidate passthrough, answer model, and official scorer. It does not construct observations, invoke the Extractor/Router, clear or restore memory, write checkpoints, or update the State scope. The launch fails before creating an experiment unless Persona and Noise match, the memory is a complete continuous prefix from Session 1 through the latest selected query Session, and every State Evidence reference resolves. Each query still applies its own `visible_episode_ids`, so later-session State cannot leak into an earlier query.
-
-## MedMemoryBench official evaluation
-
-The six query types now follow the metric mapping shipped by MedMemoryBench:
-
-| Query type | Official metric in CareHarness |
+| 选项 | 设置 |
 | --- | --- |
-| `entity_exact_match` (EEM) | normalized `string_contain`; every correct answer must occur in the output |
-| `multiple_choice` (MQ) | exact A–F option-set `option_match` |
-| `temporal_localization` (TLA) | independent binary LLM-as-Judge |
-| `state_update` (SUA) | independent binary LLM-as-Judge |
-| `inference_generation` (IG) | independent binary LLM-as-Judge with inference type, trap mechanism, required patient information, and common-wrong-answer metadata |
-| `multi_hop_clinical_deduction` (MCD) | independent official MCD Judge with NCR/CRC/CC, patient-specific-information and retrieval-quality penalties |
+| Dev Persona | `1` |
+| Seed | `42` |
+| Candidate budget | `24` |
+| Action budget | `6` |
+| 准备缺失/过期 Patient Graph snapshot | 勾选 |
+| Clean | 勾选 |
+| Noise | 不勾选 |
 
-Answer generation still uses the pre-existing `judge` model assignment and JSON `{"answer":"..."}` transport. `judge.task-contract.v4` receives the answer contract, query plan, retrieved State/Evidence, fixed evidence chain, protocol input, and only the decision gates selected for that experiment. It does not receive Gold, answer explanations, or Judge metadata. After that answer is frozen, the scoring stage applies the official deterministic metric or calls the separate `scoring_judge`; only this scoring-only call receives the reference answer, explanation, and official evaluation metadata. Traces and wrong-answer exports store the answer call, decision-gate provenance, and scoring Judge call separately.
+然后按顺序操作：
 
-The official Judge prompts are ported from MedMemoryBench commit `7227bc1`. TLA/SUA/IG use the official 500-token Judge budget; MCD uses 2,000. An empty Answer follows the official zero-score shortcut without spending a Judge call. Once a live scoring Judge is configured, its transport, parsing, or validation failure likewise follows the official runner's zero-score fallback; CareHarness additionally records `judge_infrastructure_failure` and the full failed trace so that this case cannot be mistaken for a substantive Judge verdict. MCD result summaries expose the official average NCR/CRC/CC and node mention/causal rates. If only Offline Mock is assigned, the four Judge-dependent types remain explicitly unscored because no Judge call exists to reproduce. EEM and MQ remain deterministic and can be evaluated without a Judge. To reproduce the paper's reported scoring setup, assign its Judge model/configuration in the **MedMemory Official Judge（仅评分）** slot; every result records the actual provider, model, temperature, and prompt version.
+1. 点击 **仅预检（不调用模型）**。
+2. 确认页面显示 `1 个 scope × 97 题`、Persona 1 / Clean，并且数据和模型状态都是 ready。
+3. 点击 **启动 1 个 CareHarness 运行**。
+4. 保持后端服务运行，等待全部步骤完成；运行中不要重启服务。
 
-## MedLoCoMo official evaluation
+如果兼容的 Patient Graph 已存在，系统会跳过重复构建；缺失或过期时会先调用 Extractor 和 Router 构建。
 
-MedLoCoMo answer generation uses the benchmark's short-answer contract: an English answer of at most 10 words with no explanation. Adversarial questions request the canonical `the question is not answerable` phrase. Gold answers and hidden evidence annotations remain unavailable until the answer is frozen.
+## 6. 可选：使用 CLI 运行
 
-Answerable questions record the official normalized token F1, including the comma-aware maximum, and are independently graded 0/1 with the paper's fixed Judge prompt. Adversarial questions bypass the Judge and use the normalized abstention-phrase matcher. Result summaries expose F1, answerable Judge accuracy (J), adversarial abstention accuracy (Acc), and the official item-weighted combined Score for overall, single-admission, and cross-admission splits. The **MedLoCoMo Answerable Judge** model slot inherits the current global model by default; assigning a dedicated profile freezes it for that experiment. The paper reports `gemini-3-flash-preview`, while CareHarness records the actual selected provider/model so runs using another current model are not mislabeled as paper-reproduction runs. Offline Mock never fabricates a Judge verdict: answerable F1 remains diagnostic, while J and combined Score stay incomplete until a live Judge is configured.
+CLI 会读取同一个 SQLite 中保存的模型 profile 和 assignments。第一次运行前，应先通过前端完成模型配置。
 
-The MedLoCoMo experiment page automatically reads the newest matching results for the selected Patient and question type. It displays Overall, Single-admission, and Cross-admission independently in the paper's F1/J/Acc/Score order: a Single-only run updates only Single, a Cross-only run updates only Cross, and an all-question run can update all three scopes. Experiment lists and dashboards transfer summary payloads only; opening an experiment loads a compact index, then retrieves one question or Run trace on demand. This keeps large MedLoCoMo and MedMemory result records inspectable without serializing the entire experiment into one browser string.
+如果缺少 Patient Graph snapshot：
 
-## Session-level State construction
+```bash
+npm run medmemory:persona1 -- --prepare-snapshots
+```
 
-Historical and benchmark memory construction uses one model call pair per complete Session: the Evidence Extractor reads the whole transcript, then the State Router routes the retained Evidence. The model emits only normalized Evidence text and family choices. Code attaches the immutable Session/Admission identifier to Evidence and State, assigns Router IDs from input order, and validates the Router envelope and item count; the model never generates provenance, source text, offsets, IDs, or persistence operations.
+如果已经有完整兼容的 snapshot：
 
-The Extractor keeps symptoms, medication status, measurements, diagnoses, patient beliefs/goals/constraints, and concrete Doctor assessments or plans. It drops greetings, empathy, encouragement, reassurance, companionship promises, metaphors, generic education not applied to the patient, and repetition. A quote may come from only one message body and may not include a transcript header or cross a Turn boundary. Real-time conversation remains Turn-level because the system must update Patient memory before generating the Doctor response.
+```bash
+npm run medmemory:persona1
+```
 
-A deliberately narrow coverage guard restores only the demonstrated Chinese direct-object pattern `我[时间词]把 <单一药名> 停了[后/之后]` when the model omits it. Every other medication statement remains with the model, including English, starts/restarts, dose/current use, instructions, questions, intentions, uncertainty, hypotheticals, third-party or multi-drug statements, corrections, and later resumptions. Every guard addition carries the code-owned Session provenance plus a trace warning. At routing time, each Evidence is assigned directly to one or more of BC, PE, PA, CS, CP, and LO. A family may appear only once for the same Evidence; duplicate family labels are removed deterministically, while an unknown family still fails validation. Evidence provenance is retained, and every State family accepts Patient, Doctor, and Structured Evidence; source type is never a family-level rejection rule.
+CLI 使用真实模型时，可在 `.env` 中配置 `CAREHARNESS_MATCHED_API_KEY`，或者使用各模型 profile 指定的环境变量。不要让 CLI 和前端服务同时写同一个 SQLite 数据库。
 
-This State-building and retrieval change uses checkpoint compatibility version `six-state-session-memory-v12`. Version 12 keeps the six family-only State schema and makes Router structure code-owned: the model selects only an ordered matrix of family names, while code creates routes, attaches IDs, normalizes harmless legacy wrappers, and validates the exact item count. Providers and models that support strict JSON Schema receive `strict:true`; other JSON-mode models are checked at the application boundary. If a JSON-mode model still exhausts its retries with a structural or taxonomy error, the deterministic six-family Router completes that Session and records the raw model failure plus an explicit fallback warning instead of making memory incomplete. Extractor provenance remains code-owned: the model outputs only normalized atomic `text`; code attaches the current immutable `episode_id` as `source_session_id` on Evidence and State. The model never generates `source_text`, character offsets, Router objects, or Router IDs. MedMemoryBench Clean and With-noise retain independent physical subjects (`medmemory-persona-N-clean` and `medmemory-persona-N-with-noise`), so rebuilding, clearing, resuming, or scoring one mode cannot overwrite or read the other. Direct current-State scoring validates the stored State schema generation, Persona/Noise namespace, continuous Session coverage, and every Evidence reference; it does not reject an otherwise compatible frozen State merely because the current builder prompt or model assignment differs. Checkpoint continuation remains stricter: each experiment persists its creation-time pipeline version and scope key, and resume requires the current builder identity, exact successful State snapshot, resolvable Evidence, and complete lineage. Older incompatible State schemas, failed or incomplete memory Sessions, and truncated snapshots are never reused as checkpoints. Query-only scoring failures may leave an experiment `partial`, but its checkpoint remains reusable when the memory build itself is complete.
+查看全部 CLI 参数：
 
-## Persistence and replay
+```bash
+npm run medmemory:matched -- --help
+```
 
-SQLite stores append-only evidence, versioned states, runs, traces, experiments, actual provider/model config, prompt versions, seed, and Git version. Formal runs commit atomically only after Auditor success. Debug branches are stored separately and do not alter formal state. Runtime databases and outputs are gitignored.
+Persona 1 / Clean 运行不要添加 `--noise noise|both`。
+
+## 7. 在前端查看结果
+
+运行完成后，仍在 **MedMemoryBench** 页面查看：
+
+- **CareHarness 运行结果**：查看 97 题总体分数、各题型分数、Suite ID、Experiment ID 和 manifest hash。
+- **Failure taxonomy 聚合**：查看错误分类数量和最高频 harness failure。
+- **打开 Experiment：逐题看 action / prompt / scorer**：进入完整的逐题结果。
+- **查看答题/评分详情**：查看某一道题的系统答案、标准答案、得分、Query Planner、候选内容、Working State、Action trace、Answer Prompt、Official Judge Prompt 和模型原始输出。
+- **Patient Graph Explorer**：查看该 Persona 的 Patient Graph、节点、Evidence、版本链和边。
+- **Runs & Errors**：查看构建或模型调用失败的具体步骤、原始响应和校验错误。
+- **一键导出错题与完整诊断**：导出错题 JSON。文件包含 benchmark 原文、Gold 和完整 trace，只能通过授权的私密渠道分享，不能提交 Git。
+
+一个可回传的正式结果应满足：
+
+- Suite 状态为 `completed`；
+- 97/97 全部完成；
+- Answer 和 Official Judge 都不是 Mock；
+- 页面显示 Suite ID、Experiment ID 和 manifest hash；
+- Judge infrastructure failure 数量被单独记录。
+
+## 8. 查看 CLI 结果
+
+CLI 成功后默认生成：
+
+```text
+reports/medmemory-careharness-results.json
+reports/medmemory-careharness-results.md
+```
+
+两个文件包含总体分数、各题型分数、manifest 和 failure taxonomy 汇总。`reports/` 是本地生成结果，不要直接提交 Git。
+
+CLI 只会把 `completed`、97/97、非 Mock、manifest 可复现的运行当作成功；partial 运行会以失败退出。
+
+## 9. 常见运行问题
+
+| 问题 | 处理方法 |
+| --- | --- |
+| MedMemoryBench 显示 unavailable | 检查 `CAREHARNESS_DATA_ROOT` 和两个 Persona 1 JSON 文件，修改 `.env` 后重启 |
+| 预检提示 Offline Mock | 回到 **模型与 Provider**，保存并分配真实模型连接 |
+| API Key missing | 服务重启后重新填写、测试并保存 Key；CLI 还需检查 `.env` |
+| 缺少 Patient Graph | 勾选准备 snapshot，或在 CLI 使用 `--prepare-snapshots` |
+| Action budget 报错 | 保持默认 `6`，不能低于 `3` |
+| 没有完成 97/97 | 在 Experiment 和 **Runs & Errors** 检查 Answer/Judge 调用及 memory 状态 |
+| `EADDRINUSE` | 关闭旧服务，或用 `PORT=9000 npm start` |
+| SQLite busy/locked | 不要让多个 CareHarness 进程同时写同一个数据库 |

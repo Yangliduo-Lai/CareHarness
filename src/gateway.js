@@ -1,5 +1,5 @@
 import { performance } from 'node:perf_hooks';
-import { PROMPTS, promptFor } from './prompts.js';
+import { PROMPTS,gatewayConnectionTestPrompt,promptFor,promptRetryInstruction,promptTextRetryInstruction } from './prompts.js';
 import { sanitizeSecrets, validateProviderConfig, SchemaError } from './schema.js';
 
 export class ModelGateway {
@@ -23,7 +23,7 @@ export class ModelGateway {
       if(!response.ok)models_error=this.#redact(raw.slice(0,500));
     } catch (error) { models_error=this.#redact(String(error)); }
     try {
-      const completion=await this.#openAI('Connection test. Return exactly this JSON object: {"ok":true}');
+      const completion=await this.#openAI(gatewayConnectionTestPrompt());
       const parsed=JSON.parse(stripFence(completion.content));
       return { ok: parsed?.ok===true, inference_ok: parsed?.ok===true, models_status, model:this.config.model, model_available:models.length?models.includes(this.config.model):null, models, models_error, response:parsed, latency_ms:performance.now()-start };
     } catch(error) { return {ok:false,inference_ok:false,models_status,model:this.config.model,model_available:models.length?models.includes(this.config.model):null,models,models_error,error:this.#redact(String(error)),latency_ms:performance.now()-start}; }
@@ -44,7 +44,7 @@ export class ModelGateway {
         for (let attempt = 0; attempt <= this.config.retries; attempt++) {
           retries = attempt;
           try {
-            const previous=attempts.at(-1),repairInstruction=attempt?retryInstruction(component,previous):null,repair=repairInstruction?`${prompt}\n\n${repairInstruction}`:prompt;
+            const previous=attempts.at(-1),repairInstruction=attempt?promptRetryInstruction(component,previous):null,repair=repairInstruction?`${prompt}\n\n${repairInstruction}`:prompt;
             requestedMaxTokens=this.#outputBudget(component,input,attempt,options.maxTokens);finishReason=null;const messages=officialMessages?(repairInstruction?[...officialMessages,{role:'user',content:repairInstruction}]:officialMessages):null,completion=await this.#openAI(repair,requestedMaxTokens,messages,structuredOutput.response_format);raw=completion.content;finishReason=completion.finish_reason;
             if(finishReason==='length')throw new Error(`Model output was truncated at max_tokens=${requestedMaxTokens}`);
             parsed = parseJSONResponse(raw,Boolean(options.extractJsonObject)); parsed = schemaValidator ? schemaValidator(parsed) : parsed;
@@ -64,11 +64,26 @@ export class ModelGateway {
     return { value: parsed, trace: this.#trace(component, input, prompt, raw, parsed, start, retries, error, attempts,finishReason,requestedMaxTokens,{...options,structuredOutput}) };
   }
 
+  async completeText(component,input,mockFactory,options={}){
+    const start=performance.now(),prompt=promptFor(component,input),officialMessages=typeof PROMPTS[component]?.messages==='function'?PROMPTS[component].messages(input):null;let raw='',value='',retries=0,error=null,attempts=[],finishReason=null,requestedMaxTokens=this.config.max_tokens;
+    try{
+      if(this.config.provider==='mock'){value=String(await mockFactory(input)||'').trim();raw=value;if(!value)throw new Error('Model provided no response');}
+      else for(let attempt=0;attempt<=this.config.retries;attempt++){
+        retries=attempt;
+        try{
+          const previous=attempts.at(-1),repairInstruction=attempt?promptTextRetryInstruction(previous):null,messages=officialMessages?(repairInstruction?[...officialMessages,{role:'user',content:repairInstruction}]:officialMessages):null,repair=repairInstruction?`${prompt}\n\n${repairInstruction}`:prompt;
+          requestedMaxTokens=this.#outputBudget(component,input,attempt,options.maxTokens);const completion=await this.#openAI(repair,requestedMaxTokens,messages,null);raw=completion.content;finishReason=completion.finish_reason;if(finishReason==='length')throw new Error(`Model output was truncated at max_tokens=${requestedMaxTokens}`);value=String(raw||'').trim();if(!value)throw new Error('Model provided no response');attempts.push({attempt,raw,parsed:value,finish_reason:finishReason,max_tokens:requestedMaxTokens,usage:completion.usage});break;
+        }catch(e){attempts.push({attempt,raw,error:String(e.message||e),finish_reason:finishReason,max_tokens:requestedMaxTokens});if(attempt===this.config.retries)throw e;await backoff(attempt,e);}
+      }
+    }catch(e){error={kind:classifyError(e),message:String(e.message||e),validation_errors:e.errors||[],suggestion:'Inspect the raw model response, correct the model/prompt configuration, then rerun this step.'};const structuredOutput={response_format:null,enforcement:'plain_text'},gatewayTrace=this.#trace(component,input,prompt,raw,value,start,retries,error,attempts,finishReason,requestedMaxTokens,{...options,structuredOutput});gatewayTrace.input=input;throw Object.assign(e,{gatewayTrace});}
+    const structuredOutput={response_format:null,enforcement:'plain_text'};return{value,trace:this.#trace(component,input,prompt,raw,value,start,retries,error,attempts,finishReason,requestedMaxTokens,{...options,structuredOutput})};
+  }
+
   async #openAI(prompt,maxTokens=this.config.max_tokens,messages=null,responseFormat={type:'json_object'}) {
     const response = await fetch(`${this.config.base_url.replace(/\/$/, '')}/chat/completions`, {
       method: 'POST', headers: this.#headers(), signal: AbortSignal.timeout(this.config.timeout_ms),
       body: JSON.stringify({ model: this.config.model, temperature: this.config.temperature, max_tokens:maxTokens,...(this.config.provider==='dashscope'?{enable_thinking:false}:{}),
-        response_format:responseFormat,messages:messages||[{role:'user',content:prompt}] })
+        ...(responseFormat?{response_format:responseFormat}:{}),messages:messages||[{role:'user',content:prompt}] })
     });
     const raw = await response.text();
     if (!response.ok) throw new Error(`Provider HTTP ${response.status}: ${this.#redact(raw.slice(0, 1000))}`);
@@ -101,10 +116,6 @@ function stripFence(text) { return text.trim().replace(/^```(?:json)?\s*/i, '').
 function parseJSONResponse(text,allowEmbedded=false){const cleaned=stripFence(String(text||''));try{return JSON.parse(cleaned)}catch(error){if(!allowEmbedded)throw error;const embedded=firstJSONObject(cleaned);if(!embedded)throw error;return JSON.parse(embedded);}}
 function firstJSONObject(text){const start=text.indexOf('{');if(start<0)return null;let depth=0,inString=false,escaped=false;for(let index=start;index<text.length;index++){const character=text[index];if(escaped){escaped=false;continue;}if(character==='\\'&&inString){escaped=true;continue;}if(character==='"'){inString=!inString;continue;}if(inString)continue;if(character==='{')depth++;else if(character==='}'&&--depth===0)return text.slice(start,index+1);}return null;}
 function classifyError(error){const message=String(error?.message||error);if(error instanceof SchemaError)return'schema_error';if(/truncated|max_tokens/i.test(message))return'truncated_output';if(/timeout|aborted/i.test(message))return'timeout';if(/fetch failed|network|socket|ECONN|ENOTFOUND/i.test(message))return'transport_error';return'model_or_parse_error';}
-function retryInstruction(component,previous){
-  if(previous?.finish_reason==='length')return`Your previous response was truncated. Start over from the original INPUT and return a fresh, complete JSON object. Do not quote, continue, analyze, or repeat the previous response.${component==='extractor'?' Return at most 24 highest-priority durable Evidence items; omit repetition and conversational detail.':''} Keep the JSON compact with no trailing whitespace or commentary.`;
-  return`Your previous response failed validation. Return a corrected replacement JSON only.\nVALIDATION ERROR: ${previous?.error||'invalid JSON'}\nPREVIOUS RESPONSE:\n${previous?.raw||''}`;
-}
 function backoff(attempt,error){const message=String(error?.message||error),delay=/fetch failed|network|socket|ECONN|ENOTFOUND|timeout|aborted/i.test(message)?500*(attempt+1):100;return new Promise(resolve=>setTimeout(resolve,delay));}
 
 const ROUTER_FAMILIES=['BC','PE','PA','CS','CP','LO'];

@@ -4,7 +4,13 @@
 /careharness.db-wal
 data/*.sqlite
 data/*.sqlite-*
+# Benchmark corpora are distributed separately and may contain patient-like data.
+data/benchmarks/
 outputs/
+# Generated evaluation artifacts can contain patient-like benchmark text and Gold/Judge traces.
+reports/medmemory-careharness-results.json
+reports/medmemory-careharness-results.md
+reports/optimization-round-*.json
 node_modules/
 .DS_Store
 coverage/
