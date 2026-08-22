@@ -15,14 +15,6 @@ export const MEDMEMORY_QUERY_METRICS=Object.freeze({
   multi_hop_clinical_deduction:'llm_judge_mcd'
 });
 
-// Transparent post-answer benchmark errata. These alternatives never enter
-// retrieval, Patient Graph construction, prompts, or the Answer Model. The
-// March ketone item is under-specified: the visible record contains a negative
-// result on 2024-03-18 and a ++ emergency result on 2024-03-20.
-export const MEDMEMORY_BENCHMARK_ERRATA=Object.freeze({
-  session_100_eem_2:Object.freeze({accepted_alternatives:Object.freeze(['++']),reason:'The question names only March 2024, while the visible record contains both a negative result on 2024-03-18 and a ++ result on 2024-03-20.'})
-});
-
 export function medMemoryMetric(task){return MEDMEMORY_QUERY_METRICS[task]||null;}
 export function medMemoryRequiresJudge(item={}){return['llm_judge','llm_judge_mcd'].includes(item.metadata?.official_evaluation?.metric||medMemoryMetric(item.task||item.query_type));}
 export function medMemoryJudgeMaxTokens(item={}){return(item.task||item.query_type)==='multi_hop_clinical_deduction'?2000:500;}
@@ -92,8 +84,8 @@ function zeroJudgeScore(item,reason){
 }
 
 function scoreStringContain(output,golds,item={}){
-  const candidates=Array.isArray(golds)?golds:[golds],actual=normalizeOfficialText(output),matches=candidates.map(answer=>matchEntityAnswer(output,answer,actual)),matched=matches.filter(item=>item.matched).map(item=>item.answer),officialCorrect=matched.length===candidates.length&&candidates.length>0,erratum=MEDMEMORY_BENCHMARK_ERRATA[item.score_id]||null,alternativeMatches=officialCorrect||!erratum?[]:erratum.accepted_alternatives.map(answer=>matchEntityAnswer(output,answer,actual)).filter(value=>value.matched),erratumApplied=!officialCorrect&&alternativeMatches.length>0,isCorrect=officialCorrect||erratumApplied;
-  return{score:isCorrect?1:0,is_correct:isCorrect,method:erratumApplied?'careharness_medmemory_benchmark_erratum_v1':'medmemory_official_string_contain',reason:erratumApplied?`原始 Gold 未匹配；命中已登记的歧义题备选答案（${alternativeMatches.map(value=>value.answer).join('、')}）。`:`匹配 ${matched.length}/${candidates.length} 个标准实体。`,details:{matched_answers:matched,total_expected:candidates.length,total_matched:matched.length,metric:'string_contain',normalization_version:'careharness-eem-canonicalization-v2',match_kinds:matches.filter(value=>value.matched).map(value=>({answer:value.answer,kind:value.kind})),official_gold_matched:officialCorrect,benchmark_erratum_applied:erratumApplied,erratum:erratumApplied?{score_id:item.score_id,accepted_answer:alternativeMatches[0].answer,reason:erratum.reason}:null}};
+  const candidates=Array.isArray(golds)?golds:[golds],actual=normalizeOfficialText(output),matches=candidates.map(answer=>matchEntityAnswer(output,answer,actual)),matched=matches.filter(value=>value.matched).map(value=>value.answer),isCorrect=matched.length===candidates.length&&candidates.length>0;
+  return{score:isCorrect?1:0,is_correct:isCorrect,method:'medmemory_official_string_contain',reason:`匹配 ${matched.length}/${candidates.length} 个标准实体。`,details:{matched_answers:matched,total_expected:candidates.length,total_matched:matched.length,metric:'string_contain',normalization_version:'careharness-eem-canonicalization-v2',match_kinds:matches.filter(value=>value.matched).map(value=>({answer:value.answer,kind:value.kind}))}};
 }
 
 function scoreOptionMatch(output,golds,answersData){

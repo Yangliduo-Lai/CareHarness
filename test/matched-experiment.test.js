@@ -72,7 +72,7 @@ test('a complex matched runtime that requires semantic evaluation rejects a miss
   await assert.rejects(()=>buildMatchedRuntimeContextWithEvaluator(complexFixture()),/relation_evaluator callback is required/);
   const simple={item:{task:'entity_exact_match',question:'患者吃什么药？'},query_plan:{query_type:'entity_exact_match',question:'患者吃什么药？',keywords:['二甲双胍'],state_scopes:[{family:'CS',priority:'primary'}],temporal_operator:'none'},states:[state('simple','CS','患者服用二甲双胍。','e-simple')],evidence:[evidence('e-simple','患者服用二甲双胍。')]};
   const output=await buildMatchedRuntimeContextWithEvaluator(simple);
-  assert.equal(output.trace.semantic_relation_evaluator.status,'not_run');
+  assert.equal(output.trace.semantic_relation_evaluator.status,'skipped_already_supported');
   assert.equal(output.trace.semantic_relation_evaluator.model_calls,0);
 });
 

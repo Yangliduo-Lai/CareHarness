@@ -5,8 +5,10 @@ import { CAREHARNESS_ACTIONS,CAREHARNESS_METHOD_CONTRACT,CAREHARNESS_RUNTIME_CON
 test('frozen method contract has exact State, control, action, and claim boundaries',()=>{
   assert.deepEqual(Object.keys(CAREHARNESS_STATE_FAMILIES),['BC','PE','PA','CS','CP','LO']);
   assert.deepEqual(CAREHARNESS_RUNTIME_CONTROLS,['scope','time','relation']);
-  assert.deepEqual(CAREHARNESS_ACTIONS,['focus','anchor','discriminate','contrast','reconcile','trace','connect','evaluate','verify','answer']);
-  assert.equal(CAREHARNESS_METHOD_CONTRACT.policy.fixed_six_step_sequence,false);
+  assert.deepEqual(CAREHARNESS_ACTIONS,['focus','anchor','connect','evaluate','verify','answer']);
+  assert.equal(CAREHARNESS_METHOD_CONTRACT.policy.fixed_six_step_sequence,true);
+  assert.equal(CAREHARNESS_METHOD_CONTRACT.policy.selective,false);
+  assert.equal(CAREHARNESS_METHOD_CONTRACT.policy.implementation,'universal_type_blind_policy');
   assert.equal(Object.hasOwn(CAREHARNESS_METHOD_CONTRACT,'decision_gates'),false);
   assert.equal(CAREHARNESS_METHOD_CONTRACT.architecture_claims.persistent_cross_state_graph,true);
   assert.equal(CAREHARNESS_METHOD_CONTRACT.architecture_claims.strict_causality_claimed,false);

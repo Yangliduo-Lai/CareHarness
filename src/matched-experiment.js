@@ -31,7 +31,7 @@ export function buildMatchedManifest({benchmark='medmemorybench',evaluation_mode
 
 export function buildMatchedRuntimeContext({evaluation_mode=MATCHED_EVALUATION_MODE,item,query_plan,states=[],evidence=[],graph_edges=[],candidate_budget=24,action_budget=6}){
   assertStaticCareHarnessMode(evaluation_mode);
-  const runtimeQuestion={task:item?.task||query_plan?.query_type||'generic',question:String(item?.question||query_plan?.question||'')};
+  const runtimeQuestion={question:String(item?.question||query_plan?.question||'')};
   assertNoHiddenRuntimeInput({runtimeQuestion,query_plan,states,evidence,graph_edges});
   const candidateBudget=positiveInteger(candidate_budget,'candidate_budget'),actionBudget=positiveInteger(action_budget,'action_budget');
   const context=executeCareHarnessPolicy(query_plan,states,evidence,{graph_edges,candidate_budget:candidateBudget,action_budget:actionBudget});

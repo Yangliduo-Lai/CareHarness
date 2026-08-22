@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { adapters } from '../src/adapters/index.js';
 import { Store } from '../src/db.js';
 import { ExperimentHarness } from '../src/experiments.js';
-import { MEDMEMORY_BENCHMARK_ERRATA,MEDMEMORY_QUERY_METRICS,medMemoryJudgeInput,medMemoryJudgeMaxTokens,renderMedMemoryJudgePrompt,scoreMedMemoryEmptyAnswer,scoreMedMemoryJudge,validateMedMemoryJudgeOutput } from '../src/medmemory-official.js';
+import { MEDMEMORY_QUERY_METRICS,medMemoryJudgeInput,medMemoryJudgeMaxTokens,renderMedMemoryJudgePrompt,scoreMedMemoryEmptyAnswer,scoreMedMemoryJudge,validateMedMemoryJudgeOutput } from '../src/medmemory-official.js';
 import { MEDMEMORY_ANSWER_PROMPT_TEMPLATES,MEDMEMORY_SHARED_SYSTEM_PROMPT,medMemoryAnswerMessages,promptFor } from '../src/prompts.js';
 
 const A=adapters();
@@ -70,27 +70,16 @@ test('official EEM is normalized string containment and official MQ is exact A-F
   assert.equal(A.medmemorybench.compatibleScore('B、C、F',mq.gold,mq).score,0);
 });
 
-test('EEM canonicalization preserves clinical result markers and acronym/name equivalence',()=>{
-  const marker=A.medmemorybench.compatibleScore('（++）',['++'],{task:'entity_exact_match'}),diagnosis=A.medmemorybench.compatibleScore('自身免疫性糖尿病（SAID）',['SAID自身免疫性糖尿病'],{task:'entity_exact_match'}),diagnosisWithAlias=A.medmemorybench.compatibleScore('SAID/LADA（自身免疫性糖尿病）',['SAID自身免疫性糖尿病'],{task:'entity_exact_match'}),range=A.medmemorybench.compatibleScore('根据记录，VPT 检查结果是 18 到 22V。',['18–22V'],{task:'entity_exact_match'});
+test('EEM canonicalization preserves clinical result markers and generic acronym/name equivalence',()=>{
+  const marker=A.medmemorybench.compatibleScore('（++）',['++'],{task:'entity_exact_match'}),diagnosis=A.medmemorybench.compatibleScore('慢性阻塞性肺疾病（COPD）',['COPD慢性阻塞性肺疾病'],{task:'entity_exact_match'}),diagnosisWithAlias=A.medmemorybench.compatibleScore('COPD/COLD（慢性阻塞性肺疾病）',['COPD慢性阻塞性肺疾病'],{task:'entity_exact_match'}),range=A.medmemorybench.compatibleScore('根据记录，检查结果是 11 到 14 mg/L。',['11–14mg/L'],{task:'entity_exact_match'});
   assert.equal(marker.score,1);
   assert.deepEqual(marker.details.match_kinds,[{answer:'++',kind:'normalized_containment'}]);
   assert.equal(diagnosis.score,1);
-  assert.deepEqual(diagnosis.details.match_kinds,[{answer:'SAID自身免疫性糖尿病',kind:'acronym_name_order_equivalence'}]);
+  assert.deepEqual(diagnosis.details.match_kinds,[{answer:'COPD慢性阻塞性肺疾病',kind:'acronym_name_order_equivalence'}]);
   assert.equal(diagnosisWithAlias.score,1);
-  assert.deepEqual(diagnosisWithAlias.details.match_kinds,[{answer:'SAID自身免疫性糖尿病',kind:'acronym_name_order_equivalence'}]);
+  assert.deepEqual(diagnosisWithAlias.details.match_kinds,[{answer:'COPD慢性阻塞性肺疾病',kind:'acronym_name_order_equivalence'}]);
   assert.equal(range.score,1);
-  assert.equal(A.medmemorybench.compatibleScore('自身免疫性糖尿病（LADA）',['SAID自身免疫性糖尿病'],{task:'entity_exact_match'}).score,0);
-});
-
-test('the under-specified March ketone item has a transparent post-answer erratum',()=>{
-  const item={score_id:'session_100_eem_2',task:'entity_exact_match'},result=A.medmemorybench.compatibleScore('++',['阴性'],item);
-  assert.deepEqual(MEDMEMORY_BENCHMARK_ERRATA.session_100_eem_2.accepted_alternatives,['++']);
-  assert.equal(result.score,1);
-  assert.equal(result.method,'careharness_medmemory_benchmark_erratum_v1');
-  assert.equal(result.details.official_gold_matched,false);
-  assert.equal(result.details.benchmark_erratum_applied,true);
-  assert.match(result.details.erratum.reason,/2024-03-18/);
-  assert.equal(A.medmemorybench.compatibleScore('++',['阴性'],{score_id:'another-item',task:'entity_exact_match'}).score,0);
+  assert.equal(A.medmemorybench.compatibleScore('慢性阻塞性肺疾病（COLD）',['COPD慢性阻塞性肺疾病'],{task:'entity_exact_match'}).score,0);
 });
 
 test('official SUA keeps the complete answer for memory-grounding judgment instead of collapsing to a label',()=>{
