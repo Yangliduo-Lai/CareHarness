@@ -7,7 +7,7 @@ export const MEDICAL_ALIAS_GROUPS = Object.freeze([
   ['视力模糊','视物模糊','眼睛模糊','看不清','vision','blurry','blurred','blurred vision'],
   ['尿酮体','尿酮','urine ketone','ketone'],
   ['血糖','glucose'],
-  ['糖化血红蛋白','hba1c','a1c'],
+  ['糖化血红蛋白','糖化','hba1c','a1c'],
   ['慢性代谢性疾病','糖尿病','2型糖尿病','type 2 diabetes','diabetes'],
   ['抗生素','antibiotic'],
   ['过敏','避用','allergy','allergic','avoid'],

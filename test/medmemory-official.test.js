@@ -71,11 +71,14 @@ test('official EEM is normalized string containment and official MQ is exact A-F
 });
 
 test('EEM canonicalization preserves clinical result markers and acronym/name equivalence',()=>{
-  const marker=A.medmemorybench.compatibleScore('（++）',['++'],{task:'entity_exact_match'}),diagnosis=A.medmemorybench.compatibleScore('自身免疫性糖尿病（SAID）',['SAID自身免疫性糖尿病'],{task:'entity_exact_match'});
+  const marker=A.medmemorybench.compatibleScore('（++）',['++'],{task:'entity_exact_match'}),diagnosis=A.medmemorybench.compatibleScore('自身免疫性糖尿病（SAID）',['SAID自身免疫性糖尿病'],{task:'entity_exact_match'}),diagnosisWithAlias=A.medmemorybench.compatibleScore('SAID/LADA（自身免疫性糖尿病）',['SAID自身免疫性糖尿病'],{task:'entity_exact_match'}),range=A.medmemorybench.compatibleScore('根据记录，VPT 检查结果是 18 到 22V。',['18–22V'],{task:'entity_exact_match'});
   assert.equal(marker.score,1);
   assert.deepEqual(marker.details.match_kinds,[{answer:'++',kind:'normalized_containment'}]);
   assert.equal(diagnosis.score,1);
   assert.deepEqual(diagnosis.details.match_kinds,[{answer:'SAID自身免疫性糖尿病',kind:'acronym_name_order_equivalence'}]);
+  assert.equal(diagnosisWithAlias.score,1);
+  assert.deepEqual(diagnosisWithAlias.details.match_kinds,[{answer:'SAID自身免疫性糖尿病',kind:'acronym_name_order_equivalence'}]);
+  assert.equal(range.score,1);
   assert.equal(A.medmemorybench.compatibleScore('自身免疫性糖尿病（LADA）',['SAID自身免疫性糖尿病'],{task:'entity_exact_match'}).score,0);
 });
 

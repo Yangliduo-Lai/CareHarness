@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { BENCHMARK_ANSWER_PROMPTS,MEDMEMORY_ANSWER_PROMPT_TEMPLATES,MEDMEMORY_SHARED_SYSTEM_PROMPT,PROMPTS,benchmarkAnswerContract,benchmarkQuestionPrompt,cpcdAnswerMessages,cpcdJudgeMessages,medMemoryAnswerMessages,promptFor,renderCpcdJudgePrompt,renderMedMemoryJudgePrompt } from '../src/prompts.js';
+import { BENCHMARK_ANSWER_PROMPTS,MEDMEMORY_ANSWER_PROMPT_TEMPLATES,MEDMEMORY_SHARED_SYSTEM_PROMPT,PROMPTS,benchmarkAnswerContract,benchmarkQuestionPrompt,compactMedMemorySource,cpcdAnswerMessages,cpcdJudgeMessages,medMemoryAnswerMessages,promptFor,renderCpcdJudgePrompt,renderMedMemoryJudgePrompt } from '../src/prompts.js';
 
 test('extractor prompt sends raw text without provenance packaging',()=>{
   const text='我按时吃药了，有时候会恶心。我希望下周复诊时问清楚。';
@@ -52,6 +52,8 @@ test('MedMemory Answer prompts use the centralized appendix system and six task 
   assert.match(messages[1].content,/Output only the option letter\(s\), such as B or B,D/);
   assert.ok(messages[1].content.endsWith('Answer:'));
 });
+
+test('MedMemory Answer input projects audit objects to grounded answer fields',()=>{const source=compactMedMemorySource({retrieved_states:[{state_id:'s1',family:'CS',value:'VPT 18–22V',event_time:'2024-06-13',evidence_ids:['e1'],audit_blob:'must-not-pass'}],retrieved_evidence:[{evidence_id:'e1',text:'患者结果出来是18到22V',event_time:'2024-06-13',debug_payload:'must-not-pass'}],working_state:{route:['CS'],state_ids:['s1'],temporal:{operator:'event_time'},evidence:{verification:{safe_to_answer:true,raw_graph:'must-not-pass'},proof:{verdict:'supported',complete:true,debug:'must-not-pass'}}},query_time_relations:[],harness_action_policy:{version:'v5',selected_actions:['focus','verify','answer'],candidate_budget:8,internal:'must-not-pass'}});assert.equal(source.states[0].value,'VPT 18–22V');assert.equal(source.evidence[0].text,'患者结果出来是18到22V');assert.equal(source.working_state.safe_to_answer,true);assert.equal(source.evidence_proof.verdict,'supported');assert.doesNotMatch(JSON.stringify(source),/must-not-pass|raw_graph|debug_payload|audit_blob/);});
 
 test('official Judge templates are sourced from prompts.js and preserve CPCD task-specific schemas',()=>{
   assert.throws(()=>benchmarkQuestionPrompt('unknown','unknown'),/No generated benchmark question prompt/);

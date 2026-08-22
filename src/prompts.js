@@ -161,17 +161,30 @@ export function communicationActionRequirements(action,{rememberedRisk=false,cur
 export function renderMedMemoryAnswerPrompt(input={}){
   const template=MEDMEMORY_ANSWER_PROMPT_TEMPLATES[input.task];
   if(!template)throw new Error(`No MedMemoryBench appendix Answer Prompt for ${input.task||'unknown task'}`);
-  const memorySource={
-    states:input.retrieved_states||[],
-    evidence:input.retrieved_evidence||[],
-    evidence_chains:input.retrieved_evidence_chains||[],
-    working_state:input.working_state||null,
-    verified_relations:input.query_time_relations||[],
-    evidence_proof:input.evidence_proof||null,
-    action_policy:input.harness_action_policy||null
-  };
+  const memorySource=compactMedMemorySource(input);
   return template.replace('<memory_source>',JSON.stringify(memorySource)).replace('<question>',String(input.question||''));
 }
+
+// The runtime objects contain audit-only duplicates (full verifier payloads,
+// graph metadata, and repeated State/Evidence copies). The Answer Model only
+// needs the grounded claims, their time/provenance, and verified relations.
+// Keeping this projection small reduces latency and prevents audit structure
+// from competing with the actual medical facts for model attention.
+export function compactMedMemorySource(input={}){
+  const states=(input.retrieved_states||[]).map(item=>pick(item,['state_id','family','value','event_time','episode_id','status','version','operation','evidence_ids']));
+  const evidence=(input.retrieved_evidence||[]).map(item=>pick(item,['evidence_id','text','event_time','episode_id','source_session_id','source_type','polarity','certainty']));
+  const evidenceChains=(input.retrieved_evidence_chains||[]).map(chain=>({chain_id:chain.chain_id||null,purpose:chain.purpose||null,covered_facets:chain.covered_facets||[],nodes:(chain.nodes||[]).map(node=>pick(node,['state_id','role','facets']))}));
+  const working=input.working_state||null,verification=working?.evidence?.verification||null,proof=input.evidence_proof||working?.evidence?.proof||null;
+  return{
+    states,evidence,evidence_chains:evidenceChains,
+    working_state:working?{route:working.route||[],temporal_operator:working.temporal?.operator||working.control_decisions?.time?.operator||'none',state_ids:working.state_ids||[],session_anchors:(working.session_anchors||[]).map(anchor=>pick(anchor,['episode_id','event_time','score','matched_keywords','matched_aliases','matched_numeric_values','evidence_ids'])),safe_to_answer:verification?.safe_to_answer??null}:null,
+    verified_relations:(input.query_time_relations||[]).map(item=>pick(item,['from_state_id','to_state_id','type','event_time','relation_quote','evidence_ids'])),
+    evidence_proof:proof?pick(proof,['verdict','complete','covered_families','missing_families','path_complete']):null,
+    action_policy:input.harness_action_policy?pick(input.harness_action_policy,['version','selected_actions','candidate_budget']):null
+  };
+}
+
+function pick(value,keys){const out={};for(const key of keys)if(value?.[key]!=null)out[key]=value[key];return out;}
 
 // 来源：MedMemoryBench 官方附录；任务：组装 Shared System Prompt + 分题型 Answer user prompt。
 export function medMemoryAnswerMessages(input={}){

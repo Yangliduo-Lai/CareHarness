@@ -1,6 +1,6 @@
 import { STATE_FAMILIES } from './schema.js';
 
-export const CAREHARNESS_METHOD_CONTRACT_VERSION='careharness-method-contract.v3';
+export const CAREHARNESS_METHOD_CONTRACT_VERSION='careharness-method-contract.v5';
 
 export const CAREHARNESS_STATE_FAMILIES=Object.freeze({
   BC:'Background and Context',
@@ -12,7 +12,7 @@ export const CAREHARNESS_STATE_FAMILIES=Object.freeze({
 });
 
 export const CAREHARNESS_RUNTIME_CONTROLS=Object.freeze(['scope','time','relation']);
-export const CAREHARNESS_ACTIONS=Object.freeze(['focus','trace','connect','evaluate','verify','answer']);
+export const CAREHARNESS_ACTIONS=Object.freeze(['focus','anchor','discriminate','contrast','reconcile','trace','connect','evaluate','verify','answer']);
 export const MATCHED_EVALUATION_MODE='static_careharness';
 
 export const CAREHARNESS_METHOD_CONTRACT=deepFreeze({
@@ -28,8 +28,8 @@ export function validateCareHarnessMethodContract(contract=CAREHARNESS_METHOD_CO
   const errors=[];
   if(JSON.stringify(Object.keys(contract?.state?.families||{}))!==JSON.stringify(STATE_FAMILIES))errors.push('State families must be exactly BC / PE / PA / CS / CP / LO');
   if(JSON.stringify(contract?.runtime?.controls)!==JSON.stringify(CAREHARNESS_RUNTIME_CONTROLS))errors.push('runtime controls must be exactly scope / time / relation');
-  if(JSON.stringify(contract?.policy?.actions)!==JSON.stringify(CAREHARNESS_ACTIONS))errors.push('actions must be exactly focus / trace / connect / evaluate / verify / answer');
-  if(contract?.policy?.selective!==true||contract?.policy?.fixed_six_step_sequence!==false)errors.push('the six actions must be a selective policy, not a fixed sequence');
+  if(JSON.stringify(contract?.policy?.actions)!==JSON.stringify(CAREHARNESS_ACTIONS))errors.push('actions must be exactly focus / anchor / discriminate / contrast / reconcile / trace / connect / evaluate / verify / answer');
+  if(contract?.policy?.selective!==true||contract?.policy?.fixed_six_step_sequence!==false)errors.push('the actions must be a selective policy, not a fixed sequence');
   if(contract?.architecture_claims?.persistent_cross_state_graph!==true)errors.push('the contract requires a persistent cross-state Patient Graph');
   if(contract?.architecture_claims?.strict_causality_claimed!==false)errors.push('the graph must not claim strict causality');
   if(contract?.architecture_claims?.learned_runtime_policy!==false||contract?.policy?.implementation!=='configured_task_class_policy')errors.push('the current runtime policy must be described as configured, not learned');

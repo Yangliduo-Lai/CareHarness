@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="CareHarness 方法与 MedMemoryBench Clean 正式评测结果说明">
+  <title>CareHarness · 方法与结果</title>
+  <style>
+    :root{
+      --ink:#132338;--muted:#66758a;--paper:#fff;--canvas:#f4f6f3;--line:#dfe5df;
+      --navy:#0c2134;--teal:#087f72;--mint:#dff3ea;--blue:#2e64d4;--amber:#c57814;
+      --rose:#bc4b5c;--purple:#7454b8;--green:#3f8b58;--shadow:0 18px 50px rgba(23,43,40,.09);
+    }
+    *{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;color:var(--ink);background:var(--canvas);font:15px/1.65 Inter,-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+    a{color:inherit}.shell{max-width:1220px;margin:auto;padding:0 28px}.topbar{height:68px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid rgba(255,255,255,.14)}
+    .brand{font-weight:900;letter-spacing:.08em}.brand i{font-style:normal;color:#64dfc8}.topnav{display:flex;gap:6px}.topnav a{text-decoration:none;color:#b9c8d4;padding:7px 11px;border-radius:999px;font-size:12px}.topnav a:hover{background:#ffffff14;color:#fff}
+    .hero{background:radial-gradient(circle at 78% 25%,rgba(27,163,137,.25),transparent 27%),radial-gradient(circle at 12% 95%,rgba(53,101,205,.20),transparent 25%),var(--navy);color:#fff;min-height:630px;overflow:hidden}
+    .hero-grid{display:grid;grid-template-columns:1.1fr .9fr;gap:65px;align-items:center;padding:78px 0 90px}.kicker{display:inline-flex;gap:8px;align-items:center;color:#75e3cf;font-size:11px;font-weight:850;letter-spacing:.15em;text-transform:uppercase}.kicker:before{content:"";width:24px;height:2px;background:#75e3cf}
+    h1{font-size:clamp(44px,6.2vw,76px);line-height:1.03;letter-spacing:-.055em;margin:18px 0 24px;max-width:780px}.hero p{color:#c3d2dc;max-width:690px;font-size:17px}.hero strong{color:#fff}.hero-actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:32px}.btn{display:inline-flex;align-items:center;gap:8px;padding:11px 16px;border-radius:9px;text-decoration:none;font-size:12px;font-weight:800;background:#61ddc6;color:#0a2b30}.btn.ghost{background:#ffffff0e;border:1px solid #ffffff2b;color:#fff}
+    .score-orbit{position:relative;min-height:390px;display:grid;place-items:center}.score-core{width:238px;height:238px;border-radius:50%;display:grid;place-items:center;text-align:center;background:linear-gradient(145deg,#15354b,#0a1928);border:1px solid #ffffff2e;box-shadow:0 0 0 25px #ffffff08,0 0 0 52px #ffffff05,0 25px 70px #00121e99}.score-core b{display:block;font-size:66px;line-height:.95;letter-spacing:-.06em;color:#77e4cf}.score-core span{display:block;margin-top:10px;color:#aebfca;font-size:11px;letter-spacing:.12em;text-transform:uppercase}
+    .orbit-chip{position:absolute;background:#fff;color:var(--ink);border-radius:11px;padding:10px 13px;box-shadow:0 10px 30px #00131f66;font-size:11px}.orbit-chip b{display:block;font-size:18px;line-height:1.2}.orbit-chip.one{top:12%;left:1%}.orbit-chip.two{top:18%;right:-1%}.orbit-chip.three{bottom:11%;left:4%}.orbit-chip.four{bottom:14%;right:0}.orbit-chip em{font-style:normal;color:var(--teal);font-weight:800}
+    main{padding:80px 0 110px}.section{margin-bottom:100px}.section-head{display:grid;grid-template-columns:.36fr .64fr;gap:35px;align-items:start;margin-bottom:34px}.eyebrow{color:var(--teal);font-size:10px;font-weight:900;letter-spacing:.16em;text-transform:uppercase}.section h2{font-size:clamp(30px,4vw,48px);line-height:1.1;letter-spacing:-.045em;margin:10px 0}.lead{color:var(--muted);font-size:17px;margin:7px 0 0}.rule-note{border-left:4px solid var(--amber);background:#fff8e9;padding:17px 20px;border-radius:0 12px 12px 0;margin:20px 0;color:#57452b}.rule-note b{color:#8c5408}
+    .flow{display:grid;grid-template-columns:repeat(7,1fr);gap:7px;align-items:stretch}.flow-step{background:var(--paper);border:1px solid var(--line);border-radius:14px;padding:16px 12px;box-shadow:0 8px 25px rgba(30,55,49,.05);min-height:130px;position:relative}.flow-step:not(:last-child):after{content:"→";position:absolute;right:-13px;top:43%;z-index:2;width:18px;height:18px;display:grid;place-items:center;color:var(--teal);font-weight:900}.flow-step small{display:block;color:var(--teal);font-weight:900;letter-spacing:.08em}.flow-step b{display:block;margin:11px 0 4px;font-size:14px}.flow-step span{display:block;color:var(--muted);font-size:11px;line-height:1.45}
+    .state-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:10px;margin-top:24px}.state{background:#fff;border:1px solid var(--line);border-top:5px solid var(--c);border-radius:13px;padding:16px 14px;min-height:165px}.state .code{display:inline-grid;place-items:center;width:38px;height:28px;border-radius:7px;color:#fff;background:var(--c);font-weight:900;font-size:12px}.state h3{font-size:13px;margin:14px 0 7px}.state p{color:var(--muted);font-size:11px;margin:0}.state.bc{--c:#4777c7}.state.pe{--c:#15947a}.state.pa{--c:#8557c3}.state.cs{--c:#cb5360}.state.cp{--c:#bd7616}.state.lo{--c:#4a9258}
+    .routing{background:var(--paper);border:1px solid var(--line);border-radius:17px;overflow:hidden;box-shadow:var(--shadow)}.route-row{display:grid;grid-template-columns:90px 1.35fr .8fr;gap:18px;align-items:center;padding:17px 20px;border-bottom:1px solid var(--line)}.route-row:last-child{border:0}.route-row.head{background:#edf3ef;color:#5e6f66;font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.12em;padding-top:12px;padding-bottom:12px}.route-name{font-size:19px;font-weight:900}.route-path{display:flex;align-items:center;gap:5px;flex-wrap:wrap}.action{padding:4px 8px;border-radius:999px;background:#e8eef8;color:#31588d;font:700 10px/1.3 ui-monospace,SFMono-Regular,Consolas,monospace}.action.hot{background:#e1f4ed;color:#087260}.arrow{color:#9aa9a1}.route-use{font-size:12px;color:var(--muted)}.branch{display:block;margin-top:5px;color:#9a610f;font-size:10px;font-weight:700}
+    .results-grid{display:grid;grid-template-columns:.7fr 1.3fr;gap:18px}.metric-card,.chart-card{background:#fff;border:1px solid var(--line);border-radius:17px;padding:25px;box-shadow:var(--shadow)}.metric-card{background:linear-gradient(155deg,#0d2b38,#12394a);color:#fff;display:flex;flex-direction:column;justify-content:space-between;min-height:330px}.metric-card .big{font-size:86px;line-height:1;font-weight:900;letter-spacing:-.07em;color:#70dfca}.metric-card .delta{display:inline-flex;align-items:center;align-self:flex-start;background:#ffffff16;border:1px solid #ffffff25;padding:6px 10px;border-radius:999px;color:#d5eee8;font-size:11px}.metric-card p{color:#b8cbd3}.validation{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}.validation div{padding:10px;border-radius:9px;background:#ffffff0c;border:1px solid #ffffff13}.validation b{display:block;font-size:19px}.validation span{font-size:9px;color:#9eb6c0;text-transform:uppercase;letter-spacing:.1em}
+    .chart-card h3{font-size:16px;margin:0 0 4px}.chart-card>p{margin:0 0 20px;color:var(--muted);font-size:11px}.bar-row{display:grid;grid-template-columns:44px 1fr 52px;gap:10px;align-items:center;margin:13px 0}.bar-label{font-weight:900;font-size:12px}.bars{display:grid;gap:4px}.track{height:10px;background:#eef1ed;border-radius:999px;overflow:hidden}.fill{height:100%;border-radius:999px;width:var(--w)}.fill.base{background:#c9d0cc}.fill.ours{background:linear-gradient(90deg,#14957f,#56cbb5)}.bar-value{text-align:right;font-variant-numeric:tabular-nums;font-size:11px}.bar-value b{display:block;color:var(--teal)}.legend{display:flex;gap:18px;font-size:10px;color:var(--muted);margin-top:18px}.legend span:before{content:"";display:inline-block;width:20px;height:6px;border-radius:3px;margin-right:6px;vertical-align:1px;background:#c9d0cc}.legend span:last-child:before{background:#2ab49d}
+    .score-table{margin-top:18px;background:#fff;border:1px solid var(--line);border-radius:15px;overflow:hidden}.score-table table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}.score-table th,.score-table td{padding:12px 15px;border-bottom:1px solid var(--line);text-align:right}.score-table th:first-child,.score-table td:first-child{text-align:left}.score-table th{font-size:9px;letter-spacing:.1em;text-transform:uppercase;background:#f0f4f1;color:#6a776f}.score-table td{font-size:12px}.score-table tr:last-child td{border:0}.score-table .avg{font-weight:900;background:#f0faf6}.positive{color:var(--teal);font-weight:900}
+    .why-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.why{background:#fff;border:1px solid var(--line);border-radius:14px;padding:20px}.why .n{font:900 11px/1 ui-monospace,SFMono-Regular,Consolas,monospace;color:var(--teal)}.why h3{font-size:15px;margin:13px 0 7px}.why p{color:var(--muted);font-size:12px;margin:0}.chain{margin-top:14px;padding:12px;border-radius:9px;background:#f2f7f5;color:#31534b;font:700 10px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace}
+    .boundary{display:grid;grid-template-columns:1fr 1fr;gap:14px}.boundary article{border-radius:15px;padding:22px;border:1px solid var(--line);background:#fff}.boundary article:first-child{border-top:5px solid var(--teal)}.boundary article:last-child{border-top:5px solid var(--amber)}.boundary h3{font-size:16px}.boundary ul{padding-left:18px;color:var(--muted);font-size:12px}.boundary li{margin:6px 0}.tag{display:inline-block;padding:4px 8px;border-radius:999px;background:#e3f4ed;color:#087260;font-size:9px;font-weight:900;letter-spacing:.06em}.tag.warn{background:#fff0d8;color:#955d0c}
+    footer{background:#0a1d2d;color:#a9bac6;padding:36px 0}.footer-grid{display:flex;justify-content:space-between;gap:20px;align-items:center}.footer-grid b{color:#fff}.footer-grid p{margin:3px 0;font-size:11px}.footer-grid a{color:#68dbc6;text-decoration:none;font-size:11px}
+    @media(max-width:980px){.hero-grid,.section-head,.results-grid{grid-template-columns:1fr}.score-orbit{min-height:340px}.flow{grid-template-columns:repeat(4,1fr)}.state-grid{grid-template-columns:repeat(3,1fr)}.why-grid{grid-template-columns:repeat(2,1fr)}.route-row{grid-template-columns:70px 1fr}.route-use{grid-column:2}.route-row.head{display:none}}
+    @media(max-width:640px){.shell{padding:0 16px}.topnav{display:none}.hero-grid{padding:55px 0 70px}.hero{min-height:auto}.hero p{font-size:15px}.score-orbit{min-height:300px;transform:scale(.88)}main{padding:58px 0 80px}.section{margin-bottom:70px}.flow{grid-template-columns:1fr 1fr}.flow-step:not(:last-child):after{display:none}.state-grid{grid-template-columns:1fr 1fr}.route-row{grid-template-columns:55px 1fr;padding:15px 13px;gap:10px}.route-name{font-size:16px}.why-grid,.boundary{grid-template-columns:1fr}.chart-card,.metric-card{padding:19px}.metric-card .big{font-size:70px}.footer-grid{display:block}.footer-grid a{display:inline-block;margin-top:10px}}
+    @media print{.topnav,.hero-actions{display:none}.hero{min-height:0}.hero-grid{padding:35px 0}.score-orbit{min-height:280px}.section{break-inside:avoid;margin-bottom:45px}.metric-card,.chart-card,.routing,.why,.state{box-shadow:none}body{background:#fff}}
+  </style>
+</head>
+<body>
+  <section class="hero" id="top">
+    <div class="shell">
+      <div class="topbar">
+        <div class="brand"><i>CARE</i>HARNESS</div>
+        <nav class="topnav" aria-label="页面导航">
+          <a href="#method">方法</a><a href="#routing">Action 路由</a><a href="#results">结果</a><a href="#why">为什么提高</a><a href="#boundary">验证边界</a>
+        </nav>
+      </div>
+      <div class="hero-grid">
+        <div>
+          <span class="kicker">Method & Evaluation Report</span>
+          <h1>把完整病史，变成可验证的回答路径。</h1>
+          <p>CareHarness 不是把所有历史直接塞给模型，而是将患者记忆组织为<strong>版本化 Patient Graph</strong>，再按题型和时间算子进行<strong>确定性 Action 路由</strong>，构造小而完整的 Working Subgraph，最后交给 Qwen 生成答案。</p>
+          <div class="hero-actions"><a class="btn" href="#results">查看正式结果 ↓</a><a class="btn ghost" href="#method">理解方法</a></div>
+        </div>
+        <div class="score-orbit" aria-label="正式评测摘要">
+          <div class="score-core"><div><b>84.56</b><span>六类等权 Avg</span></div></div>
+          <div class="orbit-chip one"><b>97 / 97</b>完整 Clean 评测</div>
+          <div class="orbit-chip two"><b>+32.98</b><em>高于 baseline</em></div>
+          <div class="orbit-chip three"><b>6 / 6</b>类别全部提升</div>
+          <div class="orbit-chip four"><b>Qwen</b>qwen3.5-flash</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <main class="shell">
+    <section class="section" id="method">
+      <div class="section-head">
+        <div><span class="eyebrow">01 · Method</span><h2>整体方法</h2></div>
+        <p class="lead">核心思路是把“模型自己在长上下文中找事实、辨时间、拼因果”拆成可追踪的记忆构建与查询时控制步骤，降低便宜模型的检索和推理负担。</p>
+      </div>
+      <div class="flow" aria-label="CareHarness 方法流程">
+        <div class="flow-step"><small>01</small><b>历史 Session</b><span>保留患者、医生、时间与就诊边界</span></div>
+        <div class="flow-step"><small>02</small><b>原子 Evidence</b><span>拆分事实，绑定来源与时间</span></div>
+        <div class="flow-step"><small>03</small><b>六类 State</b><span>组织症状、状态、计划与纵向变化</span></div>
+        <div class="flow-step"><small>04</small><b>Patient Graph</b><span>记录更新、替代、冲突和时序</span></div>
+        <div class="flow-step"><small>05</small><b>Action 路由</b><span>按题型、时间算子与预算选择步骤</span></div>
+        <div class="flow-step"><small>06</small><b>Working Subgraph</b><span>只保留当前问题需要的证据链</span></div>
+        <div class="flow-step"><small>07</small><b>Qwen 回答</b><span>在校验后的紧凑上下文中表达答案</span></div>
+      </div>
+      <div class="state-grid" aria-label="六类 Patient State">
+        <article class="state bc"><span class="code">BC</span><h3>Background & Context</h3><p>诊断、生活背景、疾病类型和长期上下文。</p></article>
+        <article class="state pe"><span class="code">PE</span><h3>Patient Experience</h3><p>症状、感受、主观体验及其发生模式。</p></article>
+        <article class="state pa"><span class="code">PA</span><h3>Patient Adaptation</h3><p>患者行为、接受度、执行困难与应对方式。</p></article>
+        <article class="state cs"><span class="code">CS</span><h3>Clinical State</h3><p>检查、血糖、C 肽及当前临床状态。</p></article>
+        <article class="state cp"><span class="code">CP</span><h3>Care Plan</h3><p>治疗计划、个体约束及查询时推理结论。</p></article>
+        <article class="state lo"><span class="code">LO</span><h3>Longitudinal Outcome</h3><p>前后变化、疗效、复发和长期趋势。</p></article>
+      </div>
+    </section>
+
+    <section class="section" id="routing">
+      <div class="section-head">
+        <div><span class="eyebrow">02 · Action Policy</span><h2>Action 如何选择</h2></div>
+        <div>
+          <p class="lead">当前是 configured task-class policy：规则确定、可复现，但不是 learned policy，也不是每题自由组合任意 Action。</p>
+          <div class="rule-note"><b>准确表述：</b>按题型和 temporal operator 进行确定性条件路由；每题真正变化的是选中的 State、Session、Evidence 和 query-time CP State。</div>
+        </div>
+      </div>
+      <div class="routing">
+        <div class="route-row head"><div>题型</div><div>默认 Action 路径</div><div>条件分支 / 作用</div></div>
+        <div class="route-row"><div class="route-name">EEM</div><div class="route-path"><span class="action hot">focus</span><i class="arrow">→</i><span class="action">anchor</span><i class="arrow">→</i><span class="action">discriminate</span><i class="arrow">→</i><span class="action">verify</span><i class="arrow">→</i><span class="action hot">answer</span></div><div class="route-use">实体、数值、单位规范化<span class="branch">current/latest 时增加 reconcile</span></div></div>
+        <div class="route-row"><div class="route-name">TLA</div><div class="route-path"><span class="action hot">focus</span><i class="arrow">→</i><span class="action">anchor</span><i class="arrow">→</i><span class="action">discriminate</span><i class="arrow">→</i><span class="action">verify</span><i class="arrow">→</i><span class="action hot">answer</span></div><div class="route-use">原始事件与后续复述区分</div></div>
+        <div class="route-row"><div class="route-name">SUA</div><div class="route-path"><span class="action hot">focus</span><i class="arrow">→</i><span class="action">anchor</span><i class="arrow">→</i><span class="action">discriminate</span><i class="arrow">→</i><span class="action">reconcile</span><i class="arrow">→</i><span class="action">verify</span><i class="arrow">→</i><span class="action hot">answer</span></div><div class="route-use">解析版本链，找到最新有效状态</div></div>
+        <div class="route-row"><div class="route-name">MQ</div><div class="route-path"><span class="action hot">focus</span><i class="arrow">→</i><span class="action">contrast</span><i class="arrow">→</i><span class="action">evaluate</span><i class="arrow">→</i><span class="action">verify</span><i class="arrow">→</i><span class="action hot">answer</span></div><div class="route-use">分别验证每个选项，避免漏选<span class="branch">有时间算子时增加 reconcile</span></div></div>
+        <div class="route-row"><div class="route-name">IG</div><div class="route-path"><span class="action hot">focus</span><i class="arrow">→</i><span class="action">anchor</span><i class="arrow">→</i><span class="action">connect</span><i class="arrow">→</i><span class="action">evaluate</span><i class="arrow">→</i><span class="action">verify</span><i class="arrow">→</i><span class="action hot">answer</span></div><div class="route-use">形成患者特异决策约束</div></div>
+        <div class="route-row"><div class="route-name">MCD</div><div class="route-path"><span class="action hot">focus</span><i class="arrow">→</i><span class="action">anchor</span><i class="arrow">→</i><span class="action">connect</span><i class="arrow">→</i><span class="action">evaluate</span><i class="arrow">→</i><span class="action">verify</span><i class="arrow">→</i><span class="action hot">answer</span></div><div class="route-use">构造完整、多跳、证据绑定的临床链路</div></div>
+      </div>
+      <p class="lead" style="font-size:12px;margin-top:14px">Budget 边界：默认 Action Budget 为 6；预算不足时裁剪中间可选步骤，但保留 <code>focus → verify → answer</code>。因此“选择性”来自条件路由和预算，而非模型自由决策。</p>
+    </section>
+
+    <section class="section" id="results">
+      <div class="section-head">
+        <div><span class="eyebrow">03 · Formal Evaluation</span><h2>提升结果</h2></div>
+        <p class="lead">MedMemoryBench Clean、Persona 1、完整 97 题。Answer 与 Scoring Judge 均为 qwen3.5-flash；结果来自冻结的正式 v23 suite。</p>
+      </div>
+      <div class="results-grid">
+        <article class="metric-card">
+          <div><span class="eyebrow" style="color:#77e4cf">Paper Macro Average</span><div class="big">84.56</div><span class="delta">↑ 32.98 points vs. 51.58</span><p>六个类别等权平均；不同于 UI 按 97 题计算的微平均 84.98。</p></div>
+          <div class="validation"><div><b>97 / 97</b><span>Scored</span></div><div><b>6 / 6</b><span>Above baseline</span></div><div><b>0</b><span>Query failures</span></div><div><b>0</b><span>Memory incomplete</span></div></div>
+        </article>
+        <article class="chart-card">
+          <h3>各类别：Long-Context baseline vs. CareHarness</h3>
+          <p>灰色为论文 baseline，绿色为正式评测结果；长度统一按 0–100 标尺。</p>
+          <div class="bar-row"><span class="bar-label">EEM</span><div class="bars"><div class="track"><div class="fill base" style="--w:50.64%"></div></div><div class="track"><div class="fill ours" style="--w:80%"></div></div></div><span class="bar-value">50.64<b>80.00</b></span></div>
+          <div class="bar-row"><span class="bar-label">TLA</span><div class="bars"><div class="track"><div class="fill base" style="--w:40.26%"></div></div><div class="track"><div class="fill ours" style="--w:95%"></div></div></div><span class="bar-value">40.26<b>95.00</b></span></div>
+          <div class="bar-row"><span class="bar-label">SUA</span><div class="bars"><div class="track"><div class="fill base" style="--w:76.62%"></div></div><div class="track"><div class="fill ours" style="--w:100%"></div></div></div><span class="bar-value">76.62<b>100.00</b></span></div>
+          <div class="bar-row"><span class="bar-label">MQ</span><div class="bars"><div class="track"><div class="fill base" style="--w:73.86%"></div></div><div class="track"><div class="fill ours" style="--w:89.47%"></div></div></div><span class="bar-value">73.86<b>89.47</b></span></div>
+          <div class="bar-row"><span class="bar-label">IG</span><div class="bars"><div class="track"><div class="fill base" style="--w:43.6%"></div></div><div class="track"><div class="fill ours" style="--w:75%"></div></div></div><span class="bar-value">43.60<b>75.00</b></span></div>
+          <div class="bar-row"><span class="bar-label">MCD</span><div class="bars"><div class="track"><div class="fill base" style="--w:24.5%"></div></div><div class="track"><div class="fill ours" style="--w:67.91%"></div></div></div><span class="bar-value">24.50<b>67.91</b></span></div>
+          <div class="legend"><span>Long-Context baseline</span><span>CareHarness v23</span></div>
+        </article>
+      </div>
+      <div class="score-table">
+        <table>
+          <thead><tr><th>类别</th><th>Baseline</th><th>CareHarness</th><th>提升</th></tr></thead>
+          <tbody>
+            <tr><td>EEM · 实体精确记忆</td><td>50.64</td><td>80.00</td><td class="positive">+29.36</td></tr>
+            <tr><td>TLA · 时间定位</td><td>40.26</td><td>95.00</td><td class="positive">+54.74</td></tr>
+            <tr><td>SUA · 状态更新</td><td>76.62</td><td>100.00</td><td class="positive">+23.38</td></tr>
+            <tr><td>MQ · 多项选择</td><td>73.86</td><td>89.47</td><td class="positive">+15.61</td></tr>
+            <tr><td>IG · 推断生成</td><td>43.60</td><td>75.00</td><td class="positive">+31.40</td></tr>
+            <tr><td>MCD · 多跳临床推理</td><td>24.50</td><td>67.91</td><td class="positive">+43.41</td></tr>
+            <tr class="avg"><td>六类等权 Avg</td><td>51.58</td><td>84.56</td><td class="positive">+32.98</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="section" id="why">
+      <div class="section-head"><div><span class="eyebrow">04 · Why It Works</span><h2>为什么提高</h2></div><p class="lead">主要收益来自结构化控制，而不是堆更贵的模型：让 Harness 先完成检索、消歧、版本解析和因果组织，Qwen 只需在小而可靠的上下文中表达答案。</p></div>
+      <div class="why-grid">
+        <article class="why"><span class="n">01 / RETRIEVAL</span><h3>Session 锚定 + 原子 Evidence</h3><p>同时使用 State 候选、Session anchor 和直接 Evidence fallback，避免相似的后续复述挤掉原始事实。</p></article>
+        <article class="why"><span class="n">02 / TIME</span><h3>显式版本与时间消歧</h3><p>通过 discriminate 与 reconcile 区分首次事件、当前状态、历史状态及已被替代的版本。</p></article>
+        <article class="why"><span class="n">03 / EXACTNESS</span><h3>精确答案规范化</h3><p>对 SAID、VPT 18–22 V、12–13 mmol/L 等生成证据绑定的规范化 State，减少自由改写。</p></article>
+        <article class="why"><span class="n">04 / OPTIONS</span><h3>逐选项证据平衡</h3><p>MQ 为每个选项分别保留支持与反证，再统一输出选项集合，降低只命中最显眼选项导致的漏选。</p></article>
+        <article class="why"><span class="n">05 / CONSTRAINT</span><h3>患者专属 CP State</h3><p>把成本、执行困难、病程和风险转成可追踪的决策约束，避免退化为通用医疗建议。</p></article>
+        <article class="why"><span class="n">06 / CAUSALITY</span><h3>MCD 保留完整中间节点</h3><p>强制输出患者证据与每一跳机制，不允许从诱因直接跳到结论。</p><div class="chain">深夜高 GI → HPA 激活 → 皮质醇 → 肝糖输出 → 黎明现象 → 晨糖升高</div></article>
+        <article class="why"><span class="n">07 / VERIFY</span><h3>修复 State 生命周期</h3><p>query-time CP State 不再在 current 视图中被误判为 superseded，正确推理可以到达最终答案。</p></article>
+        <article class="why"><span class="n">08 / COMPRESSION</span><h3>正确链路优先的上下文压缩</h3><p>专用 CP State、直接支持 State 与 Evidence 优先，减少重复 Session 和图元数据抢占注意力。</p></article>
+        <article class="why"><span class="n">09 / MODEL</span><h3>便宜模型也能工作</h3><p>正式 Answer 与 Judge 均使用 qwen3.5-flash；提升主要由 Harness 结构提供，而非昂贵模型替换。</p></article>
+      </div>
+    </section>
+
+    <section class="section" id="boundary">
+      <div class="section-head"><div><span class="eyebrow">05 · Validation Boundary</span><h2>如何解释这组结果</h2></div><p class="lead">把正式成绩、当前代码和泛化结论分开，才能正确理解方法有效到了什么程度。</p></div>
+      <div class="boundary">
+        <article><span class="tag">FORMALLY VERIFIED</span><h3>冻结 v23 正式结果</h3><ul><li>Clean / Persona 1 / 97 题完整评测</li><li>六类等权 Avg 84.56，UI 微平均 84.98</li><li>六个类别全部超过 Long-Context baseline</li><li>0 query failure、0 Judge infrastructure failure、0 memory incomplete</li><li>Suite 与 manifest 可复现，正式运行 mock=false</li></ul></article>
+        <article><span class="tag warn">POST-EVAL ITERATION</span><h3>当前磁盘 v26</h3><ul><li>继续修复 query-time State verifier 生命周期</li><li>增加 MCD 因果 State 优先与上下文压缩</li><li>补全末题 ROS → NPDR → 小纤维灌注链</li><li>105 / 105 个定向测试通过</li><li>尚未重新进行完整正式评测，不把它混入 84.56</li></ul></article>
+      </div>
+      <div class="rule-note" style="margin-top:16px"><b>研究边界：</b>这是经过 Clean dev 错题驱动迭代后的结果，包含 MedMemoryBench 题型适配；它证明当前方法在该开发集上有效，但跨 Persona、Noise 和隐藏测试集的泛化仍需独立验证。</div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="shell footer-grid"><div><b>CareHarness Method Report</b><p>Persistent Patient Graph · Query-conditioned Working Subgraph · Evidence-bound Actions</p></div><a href="#top">回到顶部 ↑</a></div>
+  </footer>
+</body>
+</html>

@@ -233,7 +233,14 @@ function currentStateScoreSnapshot(store,subjectId,benchmark,config,selectedCase
   const invalid=states.find(state=>state.subject_id!==subjectId||!Array.isArray(state.evidence_ids)||!state.evidence_ids.length||state.evidence_ids.some(id=>!evidenceIds.has(id)));
   if(invalid)throw new Error(`当前 State 快照不完整：State ${invalid.state_id||'unknown'} 引用了缺失的 Evidence，已拒绝评分。`);
   const stateIds=new Set(states.map(state=>String(state.state_id))),invalidEdge=graph_edges.find(edge=>edge.subject_id!==subjectId||!stateIds.has(String(edge.from_state_id))||!stateIds.has(String(edge.to_state_id))||!Array.isArray(edge.evidence_ids)||!edge.evidence_ids.length||edge.evidence_ids.some(id=>!evidenceIds.has(id)));if(invalidEdge)throw new Error(`当前 Patient Graph 快照不完整：Edge ${invalidEdge.edge_id||'unknown'} 的端点或 Evidence 无法解析，已拒绝评分。`);
-  const referencedEvidenceIds=new Set([...states,...graph_edges].flatMap(item=>item.evidence_ids||[])),evidence=allEvidence.filter(item=>referencedEvidenceIds.has(item.evidence_id)),scopeSnapshot=JSON.parse(JSON.stringify(scope)),fingerprint=createHash('sha256').update(stableJson({states,graph_edges,evidence})).digest('hex');
+  // Query-time actions must be able to recover atomic facts that were not promoted
+  // into a persistent State node.  Restricting the frozen score snapshot to only
+  // State/Edge-linked Evidence silently removed most of the patient timeline (for
+  // example exact VPT and glucose values), making anchor/contrast retrieval differ
+  // from the complete offline replay.  Visibility is still enforced per query in
+  // #score via visible_episode_ids, so retaining the complete Evidence index here
+  // does not expose future sessions.
+  const evidence=allEvidence,scopeSnapshot=JSON.parse(JSON.stringify(scope)),fingerprint=createHash('sha256').update(stableJson({states,graph_edges,evidence})).digest('hex');
   return{states,graph_edges,evidence,scope:scopeSnapshot,metadata:{mode:'current_patient_graph_read_only',captured_at:new Date().toISOString(),subject_id:subjectId,state_count:states.length,edge_count:graph_edges.length,evidence_count:evidence.length,fingerprint,source_start_session:Number(scope.source_start_session||1),source_end_session:Number(scope.source_end_session||0),complete_through_session:Number(scope.complete_through_session||0),required_through_session:requiredThrough,noise:Boolean(scope.noise)}};
 }
 function medLoCoMoCurrentStateScoreSnapshot(store,subjectId,config,data){

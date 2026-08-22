@@ -15,6 +15,11 @@ test('single-Persona preflight estimates one CareHarness run per selected condit
   assert.equal(result.ok,true);assert.equal(Object.hasOwn(result.config,'modes'),false);assert.deepEqual(result.scopes.map(scope=>[scope.split,scope.condition,scope.persona_id]),[['dev','clean',1]]);assert.equal(result.estimated_experiments,2);
 });
 
+test('preflight permits a deterministic Query Planner while keeping Answer and Judge live',()=>{
+  const fixture=createFixture(),live={id:'live',name:'live',credential:'session-memory',config:{provider:'openai',model:'qwen-test',temperature:0}},offline={id:'offline-mock',name:'Offline Mock',credential:'not-required',config:{provider:'mock',model:'careharness-rules-v1',temperature:0}},models={state(){return{assignments:{global:'live',query_planner:'offline-mock'},profiles:[live,offline]}}},controller=new MatchedSuiteController(fixture.store,fixture.harness,models),result=controller.preflight({conditions:['clean']});
+  assert.equal(result.ok,true);assert.equal(result.models.find(item=>item.component==='query_planner').provider,'mock');assert.equal(result.models.find(item=>item.component==='query_planner').ready,true);assert.ok(result.models.filter(item=>['judge','scoring_judge'].includes(item.component)).every(item=>item.provider==='openai'&&item.ready));
+});
+
 test('legacy modes config is rejected rather than silently mapped to CareHarness',()=>{
   const fixture=createFixture(),controller=new MatchedSuiteController(fixture.store,fixture.harness,fixture.models);
   assert.throws(()=>controller.preflight({modes:['static_careharness']}),/modes 配置已删除/);assert.throws(()=>controller.preflight({modes:['direct']}),/modes 配置已删除/);
