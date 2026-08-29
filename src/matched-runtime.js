@@ -198,7 +198,7 @@ function validatePolicyTemporalScope(decision,input={}){
   const question=String(input.question||''),objective=String(decision.instruction?.objective||''),questionDates=datesInPolicyText(question),objectiveDates=datesInPolicyText(objective),temporal=plainObject(decision.instruction?.temporal),operator=String(temporal.operator||'').toLowerCase(),resolved=resolvePolicyTemporalDates(temporal),start=canonicalPolicyDate(temporal.start_date),end=canonicalPolicyDate(temporal.end_date),hasTemporal=hasEffectiveTemporalInstruction(temporal),boundary=plainObject(input.current_information?.refinement_boundary),boundaryTemporal=plainObject(boundary.temporal);
   if((objectiveDates.length||temporalDirectionInText(objective))&&!hasTemporal)throw new Error(`a ${actionLabel} objective containing a date or temporal direction must also encode it as an executable instruction.temporal field; objective prose is not a retrieval boundary`);
   if(!questionDates.length&&isEarliestOccurrenceQuestion(question)&&!['earliest'].includes(operator)&&String(temporal.prefer||'').toLowerCase()!=='earliest')throw new Error(`a first/onset ${actionLabel} must encode temporal.operator="earliest" or temporal.prefer="earliest"; stating “first” only in objective does not order or bound retrieval`);
-  if(!isSearch&&!questionDates.length&&isEarliestOccurrenceQuestion(question)&&!end)throw new Error('a first/onset Refine must persist an end_date derived from the retained anchor date, so unseen later records cannot re-enter');
+  if(!isSearch&&!questionDates.length&&isEarliestOccurrenceQuestion(question)&&!end&&retainedRefineAnchorDates(decision,input).length)throw new Error('a first/onset Refine must persist an end_date derived from the retained anchor date, so unseen later records cannot re-enter');
   if(Object.keys(boundaryTemporal).length){
     if(!hasTemporal)throw new Error(`${actionLabel} after Refine must explicitly carry the persistent refinement_boundary.temporal direction; an unconstrained ${actionLabel} is invalid`);
     if(!temporalInsideBoundary(temporal,boundaryTemporal))throw new Error(`${actionLabel} temporal scope attempts to broaden or omit part of the persistent Refine boundary`);
@@ -214,6 +214,14 @@ function validatePolicyTemporalScope(decision,input={}){
     ? `{"temporal":{"operator":"exact","base_date":"${questionDates[0]}","offset_days":${relativeDateOffset(question)}}}`
     : `{"temporal":{"operator":"exact","date_keys":["${questionDates[0]}"]}}`;
   throw new Error(`${actionLabel} for an explicit date must include an effective instruction.temporal event_time constraint inside the hard temporal gate, such as ${example}; putting a date only in objective or search_terms is not a temporal filter`);
+}
+
+function retainedRefineAnchorDates(decision,input={}){
+  const retained=new Set(array(decision?.instruction?.memory_ids).map(String).filter(Boolean));
+  return array(input.current_information?.memory_nodes)
+    .filter(node=>!retained.size||retained.has(String(node?.memory_id||'')))
+    .map(node=>canonicalPolicyDate(String(node?.event_time||'').slice(0,10)))
+    .filter(Boolean);
 }
 
 function fallbackTemporalInstruction(question,refinementBoundary=null){

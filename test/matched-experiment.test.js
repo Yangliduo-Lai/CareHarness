@@ -99,6 +99,12 @@ test('first-occurrence Refine persists the retained anchor date for unseen futur
   const fallback=fallbackInvestigationPolicyDecision(input);assert.equal(fallback.worker,'refine');assert.deepEqual(fallback.instruction.temporal,{operator:'earliest',end_date:'2024-01-06',prefer:'earliest'});
 });
 
+test('first-occurrence Refine does not invent an end date when retained nodes have no event date',()=>{
+  const input={allowed_workers:['refine'],question:'患者的症状最初是什么？',current_information:{memory_nodes:[memory('undated','患者描述了起初的症状。',{event_time:null})],assessment:{relevant_memory_ids:['undated']}}};
+  const fallback=fallbackInvestigationPolicyDecision(input);assert.equal(fallback.worker,'refine');assert.deepEqual(fallback.instruction.temporal,{operator:'earliest',prefer:'earliest'});
+  assert.doesNotThrow(()=>validateInvestigationPolicyDecision(fallback,input));
+});
+
 test('fallback Refine converts an exact persistent boundary into an executable date filter',()=>{
   const input={question:'在2024-01-18的记录中，患者的排尿情况出现了什么变化？',allowed_workers:['refine'],current_information:{temporal_gate:{hard:true,kind:'explicit_date',target_date:'2024-01-18',start_date:'2024-01-18',end_date:'2024-01-18'},refinement_boundary:{temporal:{operator:'exact',start_date:'2024-01-18',end_date:'2024-01-18'}},memory_nodes:[{memory_id:'dated',event_time:'2024-01-18'}]}};
   const fallback=fallbackInvestigationPolicyDecision(input);assert.equal(fallback.worker,'refine');assert.deepEqual(fallback.instruction.temporal,{operator:'exact',date_keys:['2024-01-18']});

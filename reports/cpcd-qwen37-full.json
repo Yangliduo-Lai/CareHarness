@@ -1,0 +1,622 @@
+{
+  "report_version": "cpcd-careharness-results.v2-resumable",
+  "generated_at": "2026-08-29T09:51:41.865Z",
+  "benchmark": "cpcdbench",
+  "status": "completed",
+  "expected_case_count": 20,
+  "case_count": 20,
+  "remaining_case_count": 0,
+  "model": {
+    "provider": "dashscope",
+    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "model": "qwen3.7-flash",
+    "temperature": 0,
+    "max_tokens": 1200
+  },
+  "query_count": 159,
+  "scored": 159,
+  "failed": 0,
+  "average_score": 0.8120251572327044,
+  "by_task": {
+    "session_level_response_generation": {
+      "query_count": 99,
+      "scored": 99,
+      "failed": 0,
+      "average_score": 0.901131313131313
+    },
+    "memory_recall": {
+      "query_count": 40,
+      "scored": 40,
+      "failed": 0,
+      "average_score": 0.72125
+    },
+    "temporal_causal_reasoning": {
+      "query_count": 20,
+      "scored": 20,
+      "failed": 0,
+      "average_score": 0.5525
+    }
+  },
+  "cases": [
+    {
+      "case_id": "张明_261",
+      "experiment_id": "34b1a131-224b-4859-8a27-d8637b65475f",
+      "status": "completed",
+      "query_count": 8,
+      "scored": 8,
+      "failed": 0,
+      "average_score": 0.8252499999999999,
+      "by_task": {
+        "session_level_response_generation": {
+          "query_count": 5,
+          "scored": 5,
+          "failed": 0,
+          "average_score": 0.9204000000000001
+        },
+        "memory_recall": {
+          "query_count": 2,
+          "scored": 2,
+          "failed": 0,
+          "average_score": 0.725
+        },
+        "temporal_causal_reasoning": {
+          "query_count": 1,
+          "scored": 1,
+          "failed": 0,
+          "average_score": 0.55
+        }
+      }
+    },
+    {
+      "case_id": "张明_293",
+      "experiment_id": "0531020f-921b-40c1-8d97-3212996a9efa",
+      "status": "completed",
+      "query_count": 8,
+      "scored": 8,
+      "failed": 0,
+      "average_score": 0.8252499999999999,
+      "by_task": {
+        "session_level_response_generation": {
+          "query_count": 5,
+          "scored": 5,
+          "failed": 0,
+          "average_score": 0.9203999999999999
+        },
+        "memory_recall": {
+          "query_count": 2,
+          "scored": 2,
+          "failed": 0,
+          "average_score": 0.625
+        },
+        "temporal_causal_reasoning": {
+          "query_count": 1,
+          "scored": 1,
+          "failed": 0,
+          "average_score": 0.75
+        }
+      }
+    },
+    {
+      "case_id": "张明_319",
+      "experiment_id": "929114e5-adfa-4836-b106-271fd70cfcd0",
+      "status": "completed",
+      "query_count": 8,
+      "scored": 8,
+      "failed": 0,
+      "average_score": 0.8142499999999999,
+      "by_task": {
+        "session_level_response_generation": {
+          "query_count": 5,
+          "scored": 5,
+          "failed": 0,
+          "average_score": 0.8927999999999999
+        },
+        "memory_recall": {
+          "query_count": 2,
+          "scored": 2,
+          "failed": 0,
+          "average_score": 0.75
+        },
+        "temporal_causal_reasoning": {
+          "query_count": 1,
+          "scored": 1,
+          "failed": 0,
+          "average_score": 0.55
+        }
+      }
+    },
+    {
+      "case_id": "张明_327",
+      "experiment_id": "22927762-998a-40fb-b17c-5a497d41aa2d",
+      "status": "completed",
+      "query_count": 8,
+      "scored": 8,
+      "failed": 0,
+      "average_score": 0.8435,
+      "by_task": {
+        "session_level_response_generation": {
+          "query_count": 5,
+          "scored": 5,
+          "failed": 0,
+          "average_score": 0.9196
+        },
+        "memory_recall": {
+          "query_count": 2,
+          "scored": 2,
+          "failed": 0,
+          "average_score": 0.825
+        },
+        "temporal_causal_reasoning": {
+          "query_count": 1,
+          "scored": 1,
+          "failed": 0,
+          "average_score": 0.5
+        }
+      }
+    },
+    {
+      "case_id": "张明_329",
+      "experiment_id": "4009d256-1d1e-474b-a009-5461924a3144",
+      "status": "completed",
+      "query_count": 7,
+      "scored": 7,
+      "failed": 0,
+      "average_score": 0.8097142857142857,
+      "by_task": {
+        "session_level_response_generation": {
+          "query_count": 4,
+          "scored": 4,
+          "failed": 0,
+          "average_score": 0.867
+        },
+        "memory_recall": {
+          "query_count": 2,
+          "scored": 2,
+          "failed": 0,
+          "average_score": 0.825
+        },
+        "temporal_causal_reasoning": {
+          "query_count": 1,
+          "scored": 1,
+          "failed": 0,
+          "average_score": 0.55
+        }
+      }
+    },
+    {
+      "case_id": "张晨_79",
+      "experiment_id": "a4bc5fe7-ccc7-4731-8402-80bf9875a677",
+      "status": "completed",
+      "query_count": 8,
+      "scored": 8,
+      "failed": 0,
+      "average_score": 0.86675,
+      "by_task": {
+        "session_level_response_generation": {
+          "query_count": 5,
+          "scored": 5,
+          "failed": 0,
+          "average_score": 0.9468
+        },
+        "memory_recall": {
+          "query_count": 2,
+          "scored": 2,
+          "failed": 0,
+          "average_score": 0.85
+        },
+        "temporal_causal_reasoning": {
+          "query_count": 1,
+          "scored": 1,
+          "failed": 0,
+          "average_score": 0.5
+        }
+      }
+    },
+    {
+      "case_id": "张辰_191",
+      "experiment_id": "816020d2-6456-4f3b-b6cd-ace87dac916b",
+      "status": "completed",
+      "query_count": 8,
+      "scored": 8,
+      "failed": 0,
+      "average_score": 0.675,
+      "by_task": {
+        "session_level_response_generation": {
+          "query_count": 5,
+          "scored": 5,
+          "failed": 0,
+          "average_score": 0.8800000000000001
+        },
+        "memory_recall": {
+          "query_count": 2,
+          "scored": 2,
+          "failed": 0,
+          "average_score": 0.3
+        },
+        "temporal_causal_reasoning": {
+          "query_count": 1,
+          "scored": 1,
+          "failed": 0,
+          "average_score": 0.4
+        }
+      }
+    },
+    {
+      "case_id": "张辰_787",
+      "experiment_id": "4052fd2d-6743-45d1-997a-04c70d236bf3",
+      "status": "completed",
+      "query_count": 8,
+      "scored": 8,
+      "failed": 0,
+      "average_score": 0.8292499999999999,
+      "by_task": {
+        "session_level_response_generation": {
+          "query_count": 5,
+          "scored": 5,
+          "failed": 0,
+          "average_score": 0.9067999999999999
+        },
+        "memory_recall": {
+          "query_count": 2,
+          "scored": 2,
+          "failed": 0,
+          "average_score": 0.775
+        },
+        "temporal_causal_reasoning": {
+          "query_count": 1,
+          "scored": 1,
+          "failed": 0,
+          "average_score": 0.55
+        }
+      }
+    },
+    {
+      "case_id": "张辰_845",
+      "experiment_id": "18ec1918-495e-4ced-8d6c-d1bf25dabcef",
+      "status": "completed",
+      "query_count": 8,
+      "scored": 8,
+      "failed": 0,
+      "average_score": 0.6625,
+      "by_task": {
+        "session_level_response_generation": {
+          "query_count": 5,
+          "scored": 5,
+          "failed": 0,
+          "average_score": 0.8
+        },
+        "memory_recall": {
+          "query_count": 2,
+          "scored": 2,
+          "failed": 0,
+          "average_score": 0.4
+        },
+        "temporal_causal_reasoning": {
+          "query_count": 1,
+          "scored": 1,
+          "failed": 0,
+          "average_score": 0.5
+        }
+      }
+    },
+    {
+      "case_id": "张辰_925",
+      "experiment_id": "087cc5fa-285b-4e5c-8a04-607f60f39bc2",
+      "status": "completed",
+      "query_count": 8,
+      "scored": 8,
+      "failed": 0,
+      "average_score": 0.8190000000000001,
+      "by_task": {
+        "session_level_response_generation": {
+          "query_count": 5,
+          "scored": 5,
+          "failed": 0,
+          "average_score": 0.9204000000000001
+        },
+        "memory_recall": {
+          "query_count": 2,
+          "scored": 2,
+          "failed": 0,
+          "average_score": 0.725
+        },
+        "temporal_causal_reasoning": {
+          "query_count": 1,
+          "scored": 1,
+          "failed": 0,
+          "average_score": 0.5
+        }
+      }
+    },
+    {
+      "case_id": "林思雨_414",
+      "experiment_id": "eefa3ef8-0b78-4cac-9806-950a97a725eb",
+      "status": "completed",
+      "query_count": 8,
+      "scored": 8,
+      "failed": 0,
+      "average_score": 0.63325,
+      "by_task": {
+        "session_level_response_generation": {
+          "query_count": 5,
+          "scored": 5,
+          "failed": 0,
+          "average_score": 0.7732
+        },
+        "memory_recall": {
+          "query_count": 2,
+          "scored": 2,
+          "failed": 0,
+          "average_score": 0.425
+        },
+        "temporal_causal_reasoning": {
+          "query_count": 1,
+          "scored": 1,
+          "failed": 0,
+          "average_score": 0.35
+        }
+      }
+    },
+    {
+      "case_id": "林思雨_436",
+      "experiment_id": "2e6b1d67-d8e8-4baa-838b-0f8fbc7d9a5f",
+      "status": "completed",
+      "query_count": 8,
+      "scored": 8,
+      "failed": 0,
+      "average_score": 0.90625,
+      "by_task": {
+        "session_level_response_generation": {
+          "query_count": 5,
+          "scored": 5,
+          "failed": 0,
+          "average_score": 0.96
+        },
+        "memory_recall": {
+          "query_count": 2,
+          "scored": 2,
+          "failed": 0,
+          "average_score": 0.975
+        },
+        "temporal_causal_reasoning": {
+          "query_count": 1,
+          "scored": 1,
+          "failed": 0,
+          "average_score": 0.5
+        }
+      }
+    },
+    {
+      "case_id": "林思雨_528",
+      "experiment_id": "7803584a-e51c-4659-9abd-72cb01428ed1",
+      "status": "completed",
+      "query_count": 8,
+      "scored": 8,
+      "failed": 0,
+      "average_score": 0.8395,
+      "by_task": {
+        "session_level_response_generation": {
+          "query_count": 5,
+          "scored": 5,
+          "failed": 0,
+          "average_score": 0.8532
+        },
+        "memory_recall": {
+          "query_count": 2,
+          "scored": 2,
+          "failed": 0,
+          "average_score": 0.95
+        },
+        "temporal_causal_reasoning": {
+          "query_count": 1,
+          "scored": 1,
+          "failed": 0,
+          "average_score": 0.55
+        }
+      }
+    },
+    {
+      "case_id": "林思雨_822",
+      "experiment_id": "f08a7e7d-b96b-492b-99dc-c8c2c243e7e2",
+      "status": "completed",
+      "query_count": 8,
+      "scored": 8,
+      "failed": 0,
+      "average_score": 0.85025,
+      "by_task": {
+        "session_level_response_generation": {
+          "query_count": 5,
+          "scored": 5,
+          "failed": 0,
+          "average_score": 0.9203999999999999
+        },
+        "memory_recall": {
+          "query_count": 2,
+          "scored": 2,
+          "failed": 0,
+          "average_score": 0.85
+        },
+        "temporal_causal_reasoning": {
+          "query_count": 1,
+          "scored": 1,
+          "failed": 0,
+          "average_score": 0.5
+        }
+      }
+    },
+    {
+      "case_id": "林思雨_828",
+      "experiment_id": "683c2829-4018-43be-ae60-615772969bd2",
+      "status": "completed",
+      "query_count": 8,
+      "scored": 8,
+      "failed": 0,
+      "average_score": 0.821,
+      "by_task": {
+        "session_level_response_generation": {
+          "query_count": 5,
+          "scored": 5,
+          "failed": 0,
+          "average_score": 0.9335999999999999
+        },
+        "memory_recall": {
+          "query_count": 2,
+          "scored": 2,
+          "failed": 0,
+          "average_score": 0.6
+        },
+        "temporal_causal_reasoning": {
+          "query_count": 1,
+          "scored": 1,
+          "failed": 0,
+          "average_score": 0.7
+        }
+      }
+    },
+    {
+      "case_id": "陈明_129",
+      "experiment_id": "b6d25f93-b87b-4978-8762-72f8350b6c9f",
+      "status": "completed",
+      "query_count": 8,
+      "scored": 8,
+      "failed": 0,
+      "average_score": 0.871,
+      "by_task": {
+        "session_level_response_generation": {
+          "query_count": 5,
+          "scored": 5,
+          "failed": 0,
+          "average_score": 0.8936
+        },
+        "memory_recall": {
+          "query_count": 2,
+          "scored": 2,
+          "failed": 0,
+          "average_score": 0.975
+        },
+        "temporal_causal_reasoning": {
+          "query_count": 1,
+          "scored": 1,
+          "failed": 0,
+          "average_score": 0.55
+        }
+      }
+    },
+    {
+      "case_id": "陈明_149",
+      "experiment_id": "d216d027-b43f-425f-883e-24fcade7533a",
+      "status": "completed",
+      "query_count": 8,
+      "scored": 8,
+      "failed": 0,
+      "average_score": 0.8335,
+      "by_task": {
+        "session_level_response_generation": {
+          "query_count": 5,
+          "scored": 5,
+          "failed": 0,
+          "average_score": 0.9736
+        },
+        "memory_recall": {
+          "query_count": 2,
+          "scored": 2,
+          "failed": 0,
+          "average_score": 0.625
+        },
+        "temporal_causal_reasoning": {
+          "query_count": 1,
+          "scored": 1,
+          "failed": 0,
+          "average_score": 0.55
+        }
+      }
+    },
+    {
+      "case_id": "陈明_241",
+      "experiment_id": "dc5fa57a-454f-4956-bc8c-0a6b659a98b1",
+      "status": "completed",
+      "query_count": 8,
+      "scored": 8,
+      "failed": 0,
+      "average_score": 0.7999999999999999,
+      "by_task": {
+        "session_level_response_generation": {
+          "query_count": 5,
+          "scored": 5,
+          "failed": 0,
+          "average_score": 0.9199999999999999
+        },
+        "memory_recall": {
+          "query_count": 2,
+          "scored": 2,
+          "failed": 0,
+          "average_score": 0.5249999999999999
+        },
+        "temporal_causal_reasoning": {
+          "query_count": 1,
+          "scored": 1,
+          "failed": 0,
+          "average_score": 0.75
+        }
+      }
+    },
+    {
+      "case_id": "陈明_317",
+      "experiment_id": "af0981aa-5702-4281-b797-ff23b20b25c5",
+      "status": "completed",
+      "query_count": 8,
+      "scored": 8,
+      "failed": 0,
+      "average_score": 0.84825,
+      "by_task": {
+        "session_level_response_generation": {
+          "query_count": 5,
+          "scored": 5,
+          "failed": 0,
+          "average_score": 0.9071999999999999
+        },
+        "memory_recall": {
+          "query_count": 2,
+          "scored": 2,
+          "failed": 0,
+          "average_score": 0.775
+        },
+        "temporal_causal_reasoning": {
+          "query_count": 1,
+          "scored": 1,
+          "failed": 0,
+          "average_score": 0.7
+        }
+      }
+    },
+    {
+      "case_id": "陈明_357",
+      "experiment_id": "bf03371d-25d7-4195-9c65-4a22a64526f0",
+      "status": "completed",
+      "query_count": 8,
+      "scored": 8,
+      "failed": 0,
+      "average_score": 0.86675,
+      "by_task": {
+        "session_level_response_generation": {
+          "query_count": 5,
+          "scored": 5,
+          "failed": 0,
+          "average_score": 0.9067999999999999
+        },
+        "memory_recall": {
+          "query_count": 2,
+          "scored": 2,
+          "failed": 0,
+          "average_score": 0.925
+        },
+        "temporal_causal_reasoning": {
+          "query_count": 1,
+          "scored": 1,
+          "failed": 0,
+          "average_score": 0.55
+        }
+      }
+    }
+  ]
+}
