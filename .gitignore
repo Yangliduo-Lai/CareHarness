@@ -10,6 +10,10 @@ outputs/
 # Generated evaluation artifacts can contain patient-like benchmark text and Gold/Judge traces.
 reports/medmemory-careharness-results.json
 reports/medmemory-careharness-results.md
+# Offline Oracle Teacher artifacts contain benchmark questions, Gold answers,
+# Judge-only nodes and trap metadata. They are analysis inputs, never runtime or
+# source artifacts, and must not be swept into a commit with `git add .`.
+reports/medmemory-oracle-teacher*.json
 reports/optimization-round-*.json
 node_modules/
 .DS_Store

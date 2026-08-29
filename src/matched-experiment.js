@@ -1,87 +1,259 @@
-import { createHash } from 'node:crypto';
-import { applyQueryTimeRelationEvaluation,executeCareHarnessPolicy,queryTimeRelationEvaluatorInput } from './careharness-actions.js';
 import { MATCHED_EVALUATION_MODE } from './careharness-contract.js';
-import { PROMPTS } from './prompts.js';
+import { MEDMEMORY_QUERY_METRICS } from './medmemory-official.js';
+import { assertStaticCareHarnessMode, positiveInteger, sha256, stableJson } from './matched-utils.js';
+import { medMemoryStudentPolicyManifest } from './medmemory-student-policy.js';
+import { MEDMEMORY_INVESTIGATION_STRATEGY_PROVENANCE,MEDMEMORY_INVESTIGATION_STRATEGY_VERSION,PROMPTS } from './prompts.js';
+import { RECENT_SESSION_WINDOW } from './recent-session-context.js';
+import { PATIENT_PROFILE_VERSION } from './patient-profile.js';
 
-export const MATCHED_EXPERIMENT_VERSION='medmemory-matched-experiment.v6';
-export const MEDMEMORY_FROZEN_QUERY_COUNT=97;
-const HIDDEN_KEYS=/^(gold|answers?|answer_key|source_key_points?|judge_reason|judge_metadata|official_evaluation|reference(?:_answer)?|scoring_reason)$/i;
+export {
+  assertNoHiddenRuntimeInput,
+  buildAdaptiveInvestigationContext,
+  buildDiagnosticInvestigationContext,
+  fallbackInvestigationPolicyDecision,
+  validateInvestigationPolicyDecision,
+} from './matched-runtime.js';
 
-export function buildMatchedManifest({benchmark='medmemorybench',evaluation_mode=MATCHED_EVALUATION_MODE,noise,persona_id,split='dev',query_ids=[],state_snapshot,memory_pipeline_version,models,seed=42,candidate_budget=24,action_budget=6,strict_full_suite=true}){
-  if(benchmark!=='medmemorybench')throw new Error('Matched inference-time loop currently supports MedMemoryBench only');
-  assertStaticCareHarnessMode(evaluation_mode);
-  if(memory_pipeline_version!=='patient-graph-memory-v13')throw new Error('Matched experiments require an exact v13 Patient Graph snapshot');
-  if(!state_snapshot?.fingerprint||!Number.isInteger(Number(state_snapshot.state_count))||!Number.isInteger(Number(state_snapshot.edge_count))||!Number.isInteger(Number(state_snapshot.evidence_count)))throw new Error('Matched experiments require a frozen Patient Graph fingerprint and node/edge/Evidence counts');
-  if(strict_full_suite&&query_ids.length!==MEDMEMORY_FROZEN_QUERY_COUNT)throw new Error(`Matched full-suite experiments require exactly ${MEDMEMORY_FROZEN_QUERY_COUNT} MedMemoryBench queries`);
-  const uniqueIds=[...new Set(query_ids.map(String))];if(uniqueIds.length!==query_ids.length)throw new Error('Matched experiment query_ids must be unique');
-  const publicModels=normalizeModels(models);if(!publicModels.answer||!publicModels.scoring_judge)throw new Error('Matched experiments must freeze Answer Model and Scoring Judge');
-  if(stableJson(publicModels.relation_evaluator)!==stableJson(publicModels.answer))throw new Error('Matched experiments require relation_evaluator to use exactly the Answer Model configuration');
-  const body={
-    version:MATCHED_EXPERIMENT_VERSION,benchmark,evaluation_mode,split,persona_id:Number(persona_id||1),noise:Boolean(noise),query_count:query_ids.length,query_ids:[...query_ids].map(String).sort(),
-    state_snapshot:{pipeline_version:memory_pipeline_version,fingerprint:String(state_snapshot.fingerprint),state_count:Number(state_snapshot.state_count),edge_count:Number(state_snapshot.edge_count),evidence_count:Number(state_snapshot.evidence_count),complete_through_session:Number(state_snapshot.complete_through_session||state_snapshot.required_through_session||0)},
-    models:publicModels,seed:Number(seed),temperatures:Object.fromEntries(Object.entries(publicModels).map(([key,value])=>[key,value.temperature])),
-    prompt_versions:{query_planner:PROMPTS.query_planner.version,relation_evaluator:PROMPTS.careharness_evaluate.version,answer:PROMPTS.medmemory_answer.version,scoring_judge:PROMPTS.medmemory_judge.version},
-    budgets:{candidate_budget:positiveInteger(candidate_budget,'candidate_budget'),action_budget:positiveInteger(action_budget,'action_budget'),relation_evaluator_call_budget:1,relation_edge_budget:8,semantics:budgetSemantics()},
-    mandatory_evidence_index_gate:true,
-    information_policy:{runtime_gold_or_judge_metadata_allowed:false,post_answer_offline_diagnosis_allowed:true},
-    method_claims:{persistent_versioned_patient_graph:true,query_conditioned_working_subgraph:true,persistent_cross_state_graph:true,strict_causality_claimed:false,learned_policy_claimed:false}
-  };
-  return{...body,manifest_hash:sha256(stableJson(body))};
-}
+export const MATCHED_EXPERIMENT_VERSION = 'medmemory-matched-experiment.v30-grounded-relations-disjoint-context';
+export const MEDMEMORY_MATCHED_QUERY_TYPES = Object.freeze(Object.keys(MEDMEMORY_QUERY_METRICS));
+const MEDMEMORY_MATCHED_QUERY_TYPE_SET = new Set(MEDMEMORY_MATCHED_QUERY_TYPES);
 
-export function buildMatchedRuntimeContext({evaluation_mode=MATCHED_EVALUATION_MODE,item,query_plan,states=[],evidence=[],graph_edges=[],candidate_budget=24,action_budget=6}){
-  assertStaticCareHarnessMode(evaluation_mode);
-  const runtimeQuestion={question:String(item?.question||query_plan?.question||'')};
-  assertNoHiddenRuntimeInput({runtimeQuestion,query_plan,states,evidence,graph_edges});
-  const candidateBudget=positiveInteger(candidate_budget,'candidate_budget'),actionBudget=positiveInteger(action_budget,'action_budget');
-  const context=executeCareHarnessPolicy(query_plan,states,evidence,{graph_edges,candidate_budget:candidateBudget,action_budget:actionBudget});
-  return{evaluation_mode,...context,trace:{...context.trace,mandatory_evidence_index_gate:true}};
-}
-
-export async function buildMatchedRuntimeContextWithEvaluator({relation_evaluator,...input}){
-  const baseline=buildMatchedRuntimeContext(input),selected=baseline.action_policy?.selected_actions||[];
-  if(!selected.includes('evaluate'))return{...baseline,trace:{...baseline.trace,semantic_relation_evaluator:{status:'not_run',model_calls:0,token_input:null,token_output:null,total_tokens:null,latency_ms:null}}};
-  if(baseline.verification?.safe_to_answer!==true)return{...baseline,trace:{...baseline.trace,semantic_relation_evaluator:{status:'skipped_verification_blocked',model_calls:0,blocking_rejected_states:(baseline.verification?.rejected_states||[]).filter(item=>item.blocking).length,blocking_rejected_relations:(baseline.verification?.rejected_relations||[]).filter(item=>item.blocking).length}}};
-  if(baseline.proof?.complete===true)return{...baseline,trace:{...baseline.trace,semantic_relation_evaluator:{status:'skipped_already_supported',model_calls:0}}};
-  if((baseline.proof?.missing_families||[]).length||baseline.states.length<2)return{...baseline,trace:{...baseline.trace,semantic_relation_evaluator:{status:'skipped_missing_required_families',model_calls:0,missing_families:baseline.proof?.missing_families||[]}}};
-  if(typeof relation_evaluator!=='function')throw new Error('CareHarness relation_evaluator callback is required when the matched runtime selects evaluate and deterministic checks require semantic evaluation');
-  const evaluatorInput=queryTimeRelationEvaluatorInput(input.query_plan,baseline);assertNoHiddenRuntimeInput(evaluatorInput,'relation_evaluator');
-  const preSemanticVerification=baseline.verification,evaluatorStarted=Date.now();
-  try{
-    const response=await relation_evaluator(evaluatorInput),evaluation=response?.value??response,augmented=applyQueryTimeRelationEvaluation(input.query_plan,baseline,evaluation,{full_visible_states:input.states});
-    const modelTrace=response?.trace||null,usage=evaluatorUsage(modelTrace,evaluatorStarted);
-    return withEvaluatorAccounting({...augmented,evaluation_trace:modelTrace,pre_semantic_verification:preSemanticVerification},{...augmented.trace.semantic_relation_evaluator,status:'completed',...usage,model_trace:modelTrace,pre_semantic_verification:preSemanticVerification});
-  }catch(error){
-    const message=String(error?.message||error),modelTrace=error?.gatewayTrace||null,usage=evaluatorUsage(modelTrace,evaluatorStarted),actionTrace=(baseline.action_trace||[]).map(item=>['connect','evaluate'].includes(item.action)?{...item,outcome:{...item.outcome,semantic_evaluator_used:true,semantic_evaluator_status:'failed',evaluator_error:message}}:item);
-    return withEvaluatorAccounting({...baseline,action_trace:actionTrace,evaluation_trace:modelTrace,pre_semantic_verification:preSemanticVerification},{status:'failed',...usage,error:message,error_kind:modelTrace?.error?.kind||null,model_trace:modelTrace,pre_semantic_verification:preSemanticVerification});
+export function buildMatchedManifest({
+  benchmark = 'medmemorybench',
+  evaluation_mode = MATCHED_EVALUATION_MODE,
+  noise,
+  persona_id,
+  split = 'dev',
+  query_ids = [],
+  query_types = [],
+  expected_query_count = query_ids.length,
+  adapter_query_count = expected_query_count,
+  memory_snapshot,
+  memory_pipeline_version,
+  models,
+  seed = 42,
+  candidate_budget = 24,
+  investigation_budget = 6,
+  query_concurrency = 4,
+  strict_full_suite = true,
+  action_policy_learning = {enabled:false},
+  action_policy_exploration = {enabled:false,rate:0,seed:0,training_only:true},
+}) {
+  if (benchmark !== 'medmemorybench') {
+    throw new Error('Matched inference-time loop currently supports MedMemoryBench only');
   }
+  assertStaticCareHarnessMode(evaluation_mode);
+  const normalizedSplit = String(split || 'dev').toLowerCase();
+  const normalizedPersona = Number(persona_id || 1);
+  const selectedQueryTypes = normalizeMatchedQueryTypes(query_types);
+  assertDirectedQueryScope({ query_types: selectedQueryTypes, split: normalizedSplit, persona_id: normalizedPersona });
+  validateMemorySnapshot(memory_snapshot, memory_pipeline_version);
+
+  const expectedCount = positiveInteger(expected_query_count, 'expected_query_count');
+  const adapterCount = positiveInteger(adapter_query_count, 'adapter_query_count');
+  const strictFullSuite = strict_full_suite !== false;
+  validateQueryScope({ query_ids, expectedCount, adapterCount, strictFullSuite });
+  const publicModels = normalizeModels(models);
+  validateFrozenModels(publicModels);
+  const normalizedInvestigationBudget = positiveInteger(investigation_budget, 'investigation_budget');
+  const offlineStudentPolicy=medMemoryStudentPolicyManifest();
+
+  const body = {
+    version: MATCHED_EXPERIMENT_VERSION,
+    benchmark,
+    evaluation_mode,
+    split: normalizedSplit,
+    persona_id: normalizedPersona,
+    noise: Boolean(noise),
+    query_count: query_ids.length,
+    expected_query_count: expectedCount,
+    adapter_query_count: adapterCount,
+    query_selection_policy: selectedQueryTypes.length ? 'dev_query_type_subset_complete' : 'adapter_complete_scope',
+    query_types: selectedQueryTypes,
+    strict_full_suite: strictFullSuite,
+    query_ids: [...query_ids].map(String).sort(),
+    memory_snapshot: {
+      pipeline_version: memory_pipeline_version,
+      fingerprint: String(memory_snapshot.fingerprint),
+      memory_node_count: Number(memory_snapshot.memory_node_count),
+      edge_count: Number(memory_snapshot.edge_count),
+      complete_through_session: Number(memory_snapshot.complete_through_session || memory_snapshot.required_through_session || 0),
+    },
+    models: publicModels,
+    seed: Number(seed),
+    temperatures: Object.fromEntries(Object.entries(publicModels).filter(([,value])=>value.temperature!=null).map(([key, value]) => [key, value.temperature])),
+    prompt_versions: {
+      memory_extractor: PROMPTS.extractor.version,
+      memory_relation_classifier: PROMPTS.relation_classifier.version,
+      investigation_policy: PROMPTS.investigation_policy.version,
+      relation_evaluator: PROMPTS.careharness_evaluate.version,
+      answer: PROMPTS.medmemory_answer.version,
+      scoring_judge: PROMPTS.medmemory_judge.version,
+      investigation_strategy: MEDMEMORY_INVESTIGATION_STRATEGY_VERSION,
+    },
+    policy_artifacts: {
+      offline_student: offlineStudentPolicy,
+    },
+    budgets: {
+      candidate_budget: positiveInteger(candidate_budget, 'candidate_budget'),
+      investigation_budget: normalizedInvestigationBudget,
+      investigation_policy_call_budget: normalizedInvestigationBudget + 1,
+      relation_evaluator_call_budget: 2,
+      relation_edge_budget: 10,
+      semantics: budgetSemantics(),
+    },
+    scheduling: {
+      query_concurrency: positiveInteger(query_concurrency, 'query_concurrency'),
+      independent_queries_parallel: true,
+      per_query_dependency_order: ['investigation', 'answer', 'judge'],
+      result_order: 'adapter_query_order',
+    },
+    information_policy: { runtime_gold_or_judge_metadata_allowed: false, post_answer_offline_diagnosis_allowed: true,public_query_type_strategy_profiles:true,strategy_profiles_contain_case_content:false,oracle_teacher_runtime_separated:true,offline_strategy_teacher:{...MEDMEMORY_INVESTIGATION_STRATEGY_PROVENANCE},offline_student_policy_status:offlineStudentPolicy.status,offline_student_runtime_overlap:offlineStudentPolicy.runtime_overlap,deterministic_question_temporal_gate:true,persistent_refine_boundary:true,hybrid_lexical_embedding_search:true,embedding_respects_structured_constraints:true,semantic_shortest_path_trace:true,state_update_answer_selected_memory_only:true,state_update_answer_excludes_assessor_artifacts:true,state_projection_conservative_refine:true,relative_date_documentation_lag_days:30,patient_profile_version:PATIENT_PROFILE_VERSION,patient_profile_query_independent:true,patient_profile_unranked:true,patient_profile_includes_recent_navigation:false,patient_profile_recent_sessions_disjoint:true,profile_backing_nodes_excluded_from_retrieval:true,recent_session_window:RECENT_SESSION_WINDOW,recent_sessions_unranked:true,historical_memory_only_investigation:true,answer_memory_edges_persistent_verified_source_grounded:true,query_time_connections_are_graph_facts:false },
+    action_policy_learning,
+    action_policy_exploration,
+    method_claims: {
+      persistent_unified_memory_graph: true,
+      policy_owned_investigation_state: true,
+      static_query_preanalysis: false,
+      transparent_query_type_adaptation: true,
+      extensible_worker_registry: true,
+      strict_causality_claimed: false,
+      learned_policy_claimed: action_policy_learning?.enabled===true,
+      offline_student_policy_loaded: offlineStudentPolicy.status==='loaded_builtin',
+    },
+  };
+  return { ...body, manifest_hash: sha256(stableJson(body)) };
 }
 
-export function careHarnessResultRows(experiments=[]){
-  return experiments.map(experiment=>{
-    const scores=(experiment.results||[]).filter(item=>item.kind==='score'&&item.status==='scored'),byTask={};
-    for(const item of scores)(byTask[item.task]||=[]).push(Number(item.score));
-    return{manifest_hash:experiment.config?.matched_manifest?.manifest_hash||null,runtime:experiment.config?.evaluation_mode||MATCHED_EVALUATION_MODE,split:experiment.config?.matched_manifest?.split||null,noise:Boolean(experiment.config?.noise),query_count:scores.length,score:average(scores.map(item=>Number(item.score))),by_task:Object.fromEntries(Object.entries(byTask).map(([task,values])=>[task,average(values)])),mock:scores.some(item=>item.mock===true),reproducible:Boolean(experiment.config?.matched_manifest?.manifest_hash)};
+export function selectMatchedQueryCases(cases = [], {
+  benchmark = 'medmemorybench', split = 'dev', persona_id = 1, query_types = [],
+} = {}) {
+  if (benchmark !== 'medmemorybench') {
+    throw new Error('Directed matched query selection supports MedMemoryBench only');
+  }
+  const selectedQueryTypes = normalizeMatchedQueryTypes(query_types);
+  assertDirectedQueryScope({ query_types: selectedQueryTypes, split, persona_id });
+  const selected = selectedQueryTypes.length
+    ? cases.filter(item => selectedQueryTypes.includes(String(item?.task || item?.query_type || '')))
+    : [...cases];
+  return {
+    cases: selected,
+    query_types: selectedQueryTypes,
+    query_selection_policy: selectedQueryTypes.length ? 'dev_query_type_subset_complete' : 'adapter_complete_scope',
+    adapter_query_count: cases.length,
+    expected_query_count: selected.length,
+  };
+}
+
+export function normalizeMatchedQueryTypes(value = []) {
+  if (value == null) return [];
+  if (!Array.isArray(value)) throw new Error('query_types must be an array');
+  const normalized = value.map(item => String(item || '').normalize('NFKC').trim().toLowerCase());
+  if (normalized.some(item => !item || !MEDMEMORY_MATCHED_QUERY_TYPE_SET.has(item))) {
+    throw new Error(`query_types must use MedMemoryBench types: ${MEDMEMORY_MATCHED_QUERY_TYPES.join(', ')}`);
+  }
+  if (new Set(normalized).size !== normalized.length) throw new Error('query_types must not contain duplicates');
+  return MEDMEMORY_MATCHED_QUERY_TYPES.filter(type => normalized.includes(type));
+}
+
+export function careHarnessResultRows(experiments = []) {
+  return experiments.map(experiment => {
+    const scores = (experiment.results || []).filter(item => item.kind === 'score' && item.status === 'scored');
+    const byTask = {};
+    for (const item of scores) (byTask[item.task] ||= []).push(Number(item.score));
+    const manifest = experiment.config?.matched_manifest || null;
+    return {
+      manifest_hash: manifest?.manifest_hash || null,
+      runtime: experiment.config?.evaluation_mode || MATCHED_EVALUATION_MODE,
+      split: manifest?.split || null,
+      noise: Boolean(experiment.config?.noise),
+      query_count: scores.length,
+      query_selection_policy: manifest?.query_selection_policy || null,
+      query_types: manifest?.query_types || [],
+      strict_full_suite: manifest?.strict_full_suite === true,
+      score: average(scores.map(item => Number(item.score))),
+      by_task: Object.fromEntries(Object.entries(byTask).map(([task, values]) => [task, average(values)])),
+      mock: scores.some(item => item.mock === true),
+      reproducible: Boolean(manifest?.manifest_hash),
+    };
   });
 }
 
-export function assertNoHiddenRuntimeInput(value,path='runtime'){
-  if(Array.isArray(value)){value.forEach((item,index)=>assertNoHiddenRuntimeInput(item,`${path}[${index}]`));return true;}
-  if(!value||typeof value!=='object')return true;
-  for(const[key,item]of Object.entries(value)){
-    if(HIDDEN_KEYS.test(key))throw new Error(`Forbidden post-answer field in runtime input: ${path}.${key}`);
-    assertNoHiddenRuntimeInput(item,`${path}.${key}`);
+function validateMemorySnapshot(memorySnapshot, memoryPipelineVersion) {
+  if (memoryPipelineVersion !== 'unified-memory-graph-v17-semantic-source-anchors') {
+    throw new Error('Matched experiments require an exact v17 semantic-source-anchored unified Memory Graph snapshot');
   }
-  return true;
+  const validCounts = ['memory_node_count', 'edge_count']
+    .every(key => Number.isInteger(Number(memorySnapshot?.[key])));
+  if (!memorySnapshot?.fingerprint || !validCounts) {
+    throw new Error('Matched experiments require a frozen Memory Graph fingerprint and node/edge counts');
+  }
 }
 
-function normalizeModels(models={}){const answer=models.answer||models.judge||models.global,aliases={answer,relation_evaluator:models.relation_evaluator||answer,scoring_judge:models.scoring_judge||models.global,query_planner:models.query_planner||models.global},out={};for(const[key,value]of Object.entries(aliases))if(value)out[key]={provider:value.provider||null,base_url:value.base_url||'',model:value.model||null,temperature:Number(value.temperature??0),max_tokens:Number(value.max_tokens??1200),context_length:value.context_length??null};return out;}
-function evaluatorUsage(trace,started){const tokenInput=finiteOrNull(trace?.token_input),tokenOutput=finiteOrNull(trace?.token_output);return{model_calls:1,token_input:tokenInput,token_output:tokenOutput,total_tokens:tokenInput!=null&&tokenOutput!=null?tokenInput+tokenOutput:null,latency_ms:finiteOrNull(trace?.latency_ms)??Math.max(0,Date.now()-started)};}
-function withEvaluatorAccounting(context,semanticTrace){const actionTrace=(context.action_trace||[]).map(item=>item.action==='evaluate'?{...item,cost_units:Number(item.cost_units||0)+1}:item),totalCost=actionTrace.reduce((sum,item)=>sum+Number(item.cost_units||0),0),actionPolicy={...context.action_policy,total_cost_units:totalCost},trace={...context.trace,careharness_action_policy:{...context.trace?.careharness_action_policy,total_cost_units:totalCost},semantic_relation_evaluator:semanticTrace};return{...context,action_trace:actionTrace,action_policy:actionPolicy,trace};}
-function finiteOrNull(value){if(value==null||value==='')return null;const number=Number(value);return Number.isFinite(number)?number:null;}
-function budgetSemantics(){return{candidates:'candidate_budget_state_evidence',actions:'selective_action_budget',relation_evaluator:'at_most_one_model_call_for_complex_query_and_at_most_8_relations'};}
-function assertStaticCareHarnessMode(value){if(value!==MATCHED_EVALUATION_MODE)throw new Error(`Matched evaluation mode is fixed to ${MATCHED_EVALUATION_MODE}; legacy comparator modes have been removed`);return value;}
-function positiveInteger(value,name){const number=Number(value);if(!Number.isInteger(number)||number<=0)throw new Error(`${name} must be a positive integer`);return number;}
-function average(values){return values.length?values.reduce((sum,value)=>sum+value,0)/values.length:null;}
-function sha256(value){return createHash('sha256').update(value).digest('hex');}
-function stableJson(value){if(Array.isArray(value))return`[${value.map(stableJson).join(',')}]`;if(value&&typeof value==='object')return`{${Object.keys(value).sort().map(key=>`${JSON.stringify(key)}:${stableJson(value[key])}`).join(',')}}`;return JSON.stringify(value);}
+function validateQueryScope({ query_ids, expectedCount, adapterCount, strictFullSuite }) {
+  if (expectedCount > adapterCount) throw new Error('Matched expected_query_count cannot exceed adapter_query_count');
+  if (strictFullSuite && query_ids.length !== expectedCount) {
+    throw new Error(`Matched strict query scope requires all ${expectedCount} selected queries, found ${query_ids.length}`);
+  }
+  if (new Set(query_ids.map(String)).size !== query_ids.length) {
+    throw new Error('Matched experiment query_ids must be unique');
+  }
+}
+
+function validateFrozenModels(models) {
+  if (!models.answer || !models.scoring_judge || !models.investigation_policy || !models.embedding) {
+    throw new Error('Matched experiments must freeze Answer Model, Scoring Judge, Investigation Policy, and local Embedding Model');
+  }
+  if (stableJson(models.relation_evaluator) !== stableJson(models.answer)) {
+    throw new Error('Matched experiments require relation_evaluator to use exactly the Answer Model configuration');
+  }
+}
+
+function assertDirectedQueryScope({ query_types, split, persona_id }) {
+  if (query_types.length && (String(split || 'dev').toLowerCase() !== 'dev' || Number(persona_id || 1) !== 1)) {
+    throw new Error('Directed query_types are allowed only for Persona 1 dev evaluation');
+  }
+}
+
+function normalizeModels(models = {}) {
+  const answer = models.answer || models.judge || models.global;
+  const aliases = {
+    answer,
+    relation_evaluator: models.relation_evaluator || answer,
+    scoring_judge: models.scoring_judge || models.global,
+    investigation_policy: models.investigation_policy || models.global,
+    embedding: models.embedding,
+  };
+  const normalized = {};
+  for (const [key, value] of Object.entries(aliases)) {
+    if (!value) continue;
+    normalized[key] = key==='embedding'?{
+      provider:value.provider||'local',
+      model:value.model||null,
+      base_model:value.base_model||null,
+      pooling:value.pooling||'cls',
+      normalized:value.normalized!==false,
+    }:{
+      provider: value.provider || null,
+      base_url: value.base_url || '',
+      model: value.model || null,
+      temperature: Number(value.temperature ?? 0),
+      max_tokens: Number(value.max_tokens ?? 1200),
+      context_length: value.context_length ?? null,
+    };
+  }
+  return normalized;
+}
+
+function budgetSemantics() {
+  return {
+    candidates: 'maximum unified Memory Nodes in current information',
+    actions: 'policy selects one registered worker after each observed result; non-terminal workers consume budget',
+    investigation_policy: 'one bounded transparent type-adaptive policy call per decision; no case answer or Judge metadata',
+    relation_evaluator: 'called only when the policy selects the semantic evaluation worker',
+  };
+}
+
+function average(values) {
+  return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+}

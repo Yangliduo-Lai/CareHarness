@@ -2,11 +2,11 @@ import { randomUUID } from 'node:crypto';
 import { ModelGateway } from './gateway.js';
 import { validateProviderConfig } from './schema.js';
 
-export const MODEL_COMPONENTS = ['extractor', 'router', 'generator', 'auditor', 'query_planner', 'judge', 'scoring_judge', 'medlocomo_judge', 'cpcd_judge'];
+export const MODEL_COMPONENTS = ['extractor', 'router', 'relation_classifier', 'generator', 'auditor', 'investigation_policy', 'judge', 'scoring_judge', 'medlocomo_judge', 'cpcd_judge'];
 export const PROVIDER_PRESETS = {
   mock: { label: 'Offline Mock', base_url: '', model: 'careharness-rules-v1' },
   openai: { label: 'OpenAI', base_url: 'https://api.openai.com/v1', model: 'gpt-5-mini' },
-  dashscope: { label: '阿里云百炼 / DashScope（北京）', base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen3.5-flash' },
+  dashscope: { label: '阿里云百炼 / DashScope（北京）', base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen3.7-flash' },
   deepseek: { label: 'DeepSeek', base_url: 'https://api.deepseek.com', model: 'deepseek-chat' },
   openrouter: { label: 'OpenRouter', base_url: 'https://openrouter.ai/api/v1', model: 'openai/gpt-5-mini' },
   'openai-compatible': { label: 'Custom OpenAI-compatible', base_url: '', model: '' }
@@ -24,7 +24,7 @@ export class ModelRegistry {
   }
 
   state() {
-    const assignments = this.store.modelAssignments();
+    const stored = this.store.modelAssignments(),assignments=Object.fromEntries(['global',...MODEL_COMPONENTS].filter(component=>stored[component]).map(component=>[component,stored[component]]));
     return {
       local_only: true,
       secret_policy: 'API keys stay only in server memory and are never returned, logged, traced, exported, or persisted.',
@@ -83,7 +83,7 @@ export class ModelRegistry {
   }
 
   pipelineOptions() {
-    const gateways = Object.fromEntries(MODEL_COMPONENTS.filter(x => !['query_planner','judge','scoring_judge','medlocomo_judge','cpcd_judge'].includes(x)).map(component => [component, this.gateway(component)]));
+    const gateways = Object.fromEntries(MODEL_COMPONENTS.filter(x => !['investigation_policy','judge','scoring_judge','medlocomo_judge','cpcd_judge'].includes(x)).map(component => [component, this.gateway(component)]));
     return { gateway: this.gateway('global'), componentGateways: gateways, model: this.gateway('global').publicConfig(), component_models: Object.fromEntries(Object.entries(gateways).map(([k, g]) => [k, g.publicConfig()])) };
   }
 

@@ -1,7 +1,7 @@
 import { createHash,randomUUID } from 'node:crypto';
 import { FAILURE_TAXONOMY } from './failure-attribution.js';
 
-export const OPTIMIZATION_LOOP_VERSION='careharness-inference-optimizer.v2';
+export const OPTIMIZATION_LOOP_VERSION='careharness-inference-optimizer.v3-heldout';
 
 export function selectOptimizationTarget(taxonomyReport){
   const candidates=Object.entries(taxonomyReport?.counts||{}).filter(([code,count])=>/^H[1-7]$/.test(code)&&Number(count)>0).sort((a,b)=>b[1]-a[1]||a[0].localeCompare(b[0]));
@@ -10,14 +10,18 @@ export function selectOptimizationTarget(taxonomyReport){
   return{target_code,count,component:entry.component,axis:'harness',source_split:'dev'};
 }
 
-export function evaluatePatchAcceptance({before,after,action_cost_budget,minimum_dev_gain=0,nondegradation_tolerance=0}){
-  for(const[side,metrics]of [['before',before],['after',after]])for(const metric of ['dev_score','ig_score','mcd_score','safety_score','average_action_cost'])if(!Number.isFinite(Number(metrics?.[metric])))throw new Error(`${side}.${metric} is required for patch acceptance`);
+export function evaluatePatchAcceptance({before,after,minimum_heldout_gain=0}){
+  for(const[side,metrics]of [['before',before],['after',after]]){
+    for(const metric of ['average_score','query_count','failed_query_count','mock_query_count'])if(!Number.isFinite(Number(metrics?.[metric])))throw new Error(`${side}.${metric} is required for held-out patch acceptance`);
+    if(metrics.split!=='heldout')throw new Error(`${side}.split must be heldout`);
+    if(metrics.details_accessed===true)throw new Error(`${side} held-out details must remain sealed`);
+  }
   const checks={
-    dev_improves:Number(after.dev_score)>Number(before.dev_score)+Number(minimum_dev_gain),
-    ig_non_degrading:Number(after.ig_score)>=Number(before.ig_score)-Number(nondegradation_tolerance),
-    mcd_non_degrading:Number(after.mcd_score)>=Number(before.mcd_score)-Number(nondegradation_tolerance),
-    safety_non_degrading:Number(after.safety_score)>=Number(before.safety_score)-Number(nondegradation_tolerance),
-    action_cost_within_budget:Number(after.average_action_cost)<=Number(action_cost_budget)
+    complete_same_scope:Number(before.query_count)>0&&Number(before.query_count)===Number(after.query_count),
+    no_failed_queries:Number(before.failed_query_count)===0&&Number(after.failed_query_count)===0,
+    non_mock:Number(before.mock_query_count)===0&&Number(after.mock_query_count)===0,
+    details_sealed:before.details_accessed!==true&&after.details_accessed!==true,
+    heldout_average_improves:Number(after.average_score)>Number(before.average_score)+Number(minimum_heldout_gain)
   };
   const accepted=Object.values(checks).every(Boolean),failed_checks=Object.entries(checks).filter(([,ok])=>!ok).map(([name])=>name);
   return{accepted,decision:accepted?'accepted':'reverted',checks,failed_checks,reason:accepted?'all acceptance gates passed':`failed acceptance gates: ${failed_checks.join(', ')}`};

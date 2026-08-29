@@ -1,101 +1,144 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync,rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
 import { Store } from '../src/db.js';
 import { Pipeline,pipelineInternals } from '../src/pipeline.js';
+import { validateMemoryEdge } from '../src/schema.js';
+import { inspectLongitudinalRelation,updateMemoryGraph } from '../src/memory-graph-updater.js';
 
-const observation=(text,episode,event_time)=>({subject_id:'graph-patient',source_type:'patient',episode_id:episode,turn_id:'1',event_time,raw_text:text});
+const observation=(text,episode,event_time,source_type='patient')=>({subject_id:'graph-patient',source_type,episode_id:episode,turn_id:'1',event_time,raw_text:text});
+const incoming=(memory_id,text,extra={})=>({memory_id,observation_id:`o-${memory_id}`,subject_id:'graph-patient',text,source_text:text,span:[0,text.length],source_type:'patient',episode_id:'session-1',turn_id:'1',event_time:'2025-01-01',certainty:1,polarity:'affirmed',families:['PE'],...extra});
+const relationProposal=(from,to,relation_type,extra={})=>({candidate_id:'relation_candidate_001',from_memory_id:from,to_memory_id:to,relation_type,edge_family:['informs','motivates','constrains'].includes(relation_type)?'clinical_care':'temporal',confidence:.93,reason:'两个原文端点直接支持该非因果关系。',support_memory_ids:[from,to],source:'llm_source_grounded_relation_classifier',causal_claim:false,...extra});
 
-test('one Patient Graph stores six-family typed nodes and conservative cross-state candidates',async()=>{
-  const store=new Store(':memory:'),pipeline=new Pipeline(store);
-  const result=await pipeline.run(observation('我正在服用二甲双胍。','session-1','2025-01-01'),{phase:'memory_build'}),graph=store.patientGraphFor('graph-patient');
-  assert.equal(result.traces.filter(item=>item.component==='patient_graph_updater').length,1);
-  assert.ok(graph.nodes.some(node=>node.family==='PE'));assert.ok(graph.nodes.some(node=>node.family==='CS'));
-  assert.ok(graph.nodes.every(node=>node.factor_key&&Array.isArray(node.factor_domains)));
-  const shared=graph.edges.find(edge=>edge.edge_family==='clinical_care');
-  assert.equal(shared.status,'candidate');assert.equal(shared.verified,false);assert.equal(shared.support_kind,'hypothesized');assert.equal(shared.causal_claim,false);
-  store.close();
+test('one factual occurrence is one Memory Node with multiple family labels',()=>{
+  const update=pipelineInternals.updateMemoryGraph([incoming('m1','患者正在服用二甲双胍。',{families:['PE','CS']})],[],[],{subject_id:'graph-patient'});
+  assert.equal(update.nodes.length,1);assert.deepEqual(update.nodes[0].families,['PE','CS']);assert.equal(update.edges.length,0);
 });
 
-test('factor domains stay orthogonal to the six node families',()=>{
-  const make=(text,evidence_id,families)=>({id:evidence_id,evidence_id,subject_id:'graph-patient',source_type:'patient',episode_id:'session-1',source_session_id:'session-1',turn_id:'1',event_time:'2025-01-01',text,certainty:1,polarity:'affirmed',families}),medical=pipelineInternals.updatePatientGraph([make('患者既往有糖尿病病史。','e-medical',['BC'])],[],[],{subject_id:'graph-patient'}).nodes[0],work=pipelineInternals.updatePatientGraph([make('患者因工作费用压力缺少家庭支持。','e-social',['BC'])],[],[],{subject_id:'graph-patient'}).nodes[0],adherence=pipelineInternals.updatePatientGraph([make('患者经常漏服二甲双胍。','e-behavior',['PE'])],[],[],{subject_id:'graph-patient'}).nodes[0];
-  assert.ok(medical.factor_domains.includes('biological'));assert.ok(work.factor_domains.includes('social'));assert.ok(adherence.factor_domains.includes('behavioral'));assert.deepEqual(new Set([medical.family,work.family,adherence.family]),new Set(['BC','PE']));
+test('factor domains remain orthogonal to family labels',()=>{
+  const update=pipelineInternals.updateMemoryGraph([incoming('medical','患者既往有糖尿病病史。',{families:['BC']}),incoming('social','患者因工作费用压力缺少家庭支持。',{families:['BC']}),incoming('behavior','患者经常漏服二甲双胍。',{families:['PE']})],[],[],{subject_id:'graph-patient'}),byId=new Map(update.nodes.map(node=>[node.memory_id,node]));
+  assert.ok(byId.get('medical').factor_domains.includes('biological'));assert.ok(byId.get('social').factor_domains.includes('social'));assert.ok(byId.get('behavior').factor_domains.includes('behavioral'));
 });
 
-test('version transitions are persistent verified temporal edges and checkpoints restore nodes plus edges',async()=>{
-  const store=new Store(':memory:'),pipeline=new Pipeline(store);
-  await pipeline.run(observation('我正在服用二甲双胍。','session-1','2025-01-01'),{phase:'memory_build'});
-  await pipeline.run(observation('我已经停用二甲双胍。','session-2','2025-02-01'),{phase:'memory_build'});
-  const before=structuredClone(store.patientGraphFor('graph-patient')),temporal=before.edges.filter(edge=>edge.edge_family==='temporal');
-  assert.ok(temporal.length>=2);assert.ok(temporal.every(edge=>edge.status==='verified'&&edge.support_kind==='structural'&&edge.persistent===true));
-  store.saveMemoryCheckpoint({benchmark:'test',subject_id:'graph-patient',scope_key:'graph-v13',session_no:2,prefix_hash:'prefix',experiment_id:'test-experiment'});
-  const checkpoint=store.getMemoryCheckpoint({benchmark:'test',subject_id:'graph-patient',scope_key:'graph-v13',session_no:2,prefix_hash:'prefix'});
-  assert.equal(checkpoint.edges.length,before.edges.length);store.clearMemory('graph-patient');assert.equal(store.patientGraphFor('graph-patient').nodes.length,0);
-  const restored=store.restoreMemoryCheckpoint(checkpoint),after=store.patientGraphFor('graph-patient');
-  assert.equal(restored.restored,before.nodes.length);assert.equal(restored.restored_edges,before.edges.length);assert.deepEqual(after.nodes,before.nodes);assert.deepEqual(after.edges,before.edges);store.close();
+test('one dated Session remains provenance membership and is not materialized as ordinary edges',()=>{
+  const update=pipelineInternals.updateMemoryGraph([incoming('a','患者报告目标症状。'),incoming('b','医生记录相关检查。'),incoming('c','患者确认治疗执行。')],[],[],{subject_id:'graph-patient'});
+  assert.equal(update.edges.some(edge=>edge.relation_type==='co_observed'),false);
+  assert.deepEqual(update.episode_memberships,[{episode_id:'session-1',memory_ids:['a','b','c']}]);
 });
 
-test('legacy states table migrates losslessly into canonical Patient Graph nodes',()=>{
-  const directory=mkdtempSync(join(tmpdir(),'careharness-graph-migration-')),path=join(directory,'legacy.sqlite'),legacy=new DatabaseSync(path),state={state_id:'legacy-state',subject_id:'legacy-patient',family:'CS',value:'患者血糖偏高。',status:'active',version:1,version_chain:[],evidence_ids:['legacy-evidence']};
-  legacy.exec(`CREATE TABLE runs(id TEXT PRIMARY KEY,subject_id TEXT NOT NULL,dataset TEXT NOT NULL,status TEXT NOT NULL,branch_kind TEXT NOT NULL,seed INTEGER NOT NULL,config_json TEXT NOT NULL,version_json TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,final_json TEXT,error_json TEXT);CREATE TABLE states(id TEXT PRIMARY KEY,run_id TEXT NOT NULL,subject_id TEXT NOT NULL,family TEXT NOT NULL,status TEXT NOT NULL,version INTEGER NOT NULL,payload_json TEXT NOT NULL);`);
-  legacy.prepare(`INSERT INTO runs VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).run('legacy-run','legacy-patient','core','completed','formal',42,'{}','{}','2025-01-01','2025-01-01',null,null);legacy.prepare(`INSERT INTO states VALUES(?,?,?,?,?,?,?)`).run(state.state_id,'legacy-run',state.subject_id,state.family,state.status,state.version,JSON.stringify(state));legacy.close();
-  const store=new Store(path);assert.deepEqual(store.graphNodesFor('legacy-patient'),[state]);assert.equal(store.db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='states'`).get(),undefined);store.close();rmSync(directory,{recursive:true,force:true});
+test('quantitative changes form one version chain with a verified temporal edge',()=>{
+  const first=pipelineInternals.updateMemoryGraph([incoming('jan','患者空腹血糖为 7 mmol/L。',{families:['CS'],event_time:'2025-01-01'})],[],[],{subject_id:'graph-patient'}),second=pipelineInternals.updateMemoryGraph([incoming('feb','患者空腹血糖为 9 mmol/L。',{families:['CS'],episode_id:'session-2',event_time:'2025-02-01'})],first.nodes,first.edges,{subject_id:'graph-patient'});
+  assert.equal(first.nodes[0].factor_key,second.nodes[0].factor_key);assert.equal(second.nodes[0].predecessor_memory_id,'jan');assert.equal(second.nodes[0].operation,'UPDATE');
+  assert.ok(second.edges.some(edge=>edge.from_memory_id==='jan'&&edge.to_memory_id==='feb'&&edge.relation_type==='updates'&&edge.status==='verified'));
 });
 
-test('backfilled events remain historical and cannot replace a later current fact',()=>{
-  const route=(text,event_time,evidence_id)=>({id:evidence_id,evidence_id,subject_id:'graph-patient',source_type:'patient',episode_id:event_time==='2025-03-01'?'session-3':'session-1',source_session_id:event_time==='2025-03-01'?'session-3':'session-1',turn_id:'1',event_time,text,certainty:1,polarity:'affirmed',families:['CS']});
-  const latest=pipelineInternals.updatePatientGraph([route('患者空腹血糖为 9。','2025-03-01','e-latest')],[],[],{subject_id:'graph-patient'}),backfill=pipelineInternals.updatePatientGraph([route('患者空腹血糖为 7。','2025-01-01','e-backfill')],latest.nodes,latest.edges,{subject_id:'graph-patient'}),current=pipelineInternals.currentMemory([...latest.nodes,...backfill.nodes]);
-  assert.equal(backfill.nodes[0].version,2);assert.equal(backfill.nodes[0].operation,'ADD');assert.equal(current.length,1);assert.match(current[0].value,/9/);assert.equal(current[0].event_time,'2025-03-01');
+test('attribution wrappers and temporal wording do not split one clinical factor',()=>{
+  const first=pipelineInternals.updateMemoryGraph([incoming('wrapped-old','患者原话：患者近期晨起心率为 90 bpm。',{families:['CS'],event_time:'2025-01-01'})],[],[],{subject_id:'graph-patient'}),second=pipelineInternals.updateMemoryGraph([incoming('wrapped-new','医生记录：患者当前晨起心率为 80 bpm。',{source_type:'doctor',families:['CS'],episode_id:'session-2',event_time:'2025-02-01'})],first.nodes,first.edges,{subject_id:'graph-patient'});
+  assert.equal(second.nodes[0].factor_key,first.nodes[0].factor_key);assert.equal(second.nodes[0].predecessor_memory_id,'wrapped-old');assert.equal(second.edges[0].relation_type,'updates');
 });
 
-test('an event inserted between two versions records both immediate chronological transitions',()=>{
-  const route=(text,event_time,evidence_id)=>({id:evidence_id,evidence_id,subject_id:'graph-patient',source_type:'patient',episode_id:`session-${Number(event_time.slice(8,10))}`,source_session_id:`session-${Number(event_time.slice(8,10))}`,turn_id:'1',event_time,text,certainty:1,polarity:'affirmed',families:['CS']});let nodes=[],edges=[];
-  for(const item of [['患者空腹血糖为 7。','2025-01-01','e-jan'],['患者空腹血糖为 9。','2025-03-03','e-mar'],['患者空腹血糖为 8。','2025-02-02','e-feb']]){const update=pipelineInternals.updatePatientGraph([route(...item)],nodes,edges,{subject_id:'graph-patient'});nodes.push(...update.nodes);edges.push(...update.edges);}
-  const byTime=new Map(nodes.map(node=>[node.event_time,node.state_id])),hasUpdate=(from,to)=>edges.some(edge=>edge.edge_family==='temporal'&&edge.relation_type==='updates'&&edge.from_state_id===byTime.get(from)&&edge.to_state_id===byTime.get(to));
-  assert.equal(hasUpdate('2025-01-01','2025-02-02'),true);assert.equal(hasUpdate('2025-02-02','2025-03-03'),true);
+test('a repeated fact records persistence rather than another semantic copy layer',()=>{
+  const first=pipelineInternals.updateMemoryGraph([incoming('first','患者空腹血糖为 7 mmol/L。',{families:['CS'],event_time:'2025-01-01'})],[],[],{subject_id:'graph-patient'}),second=pipelineInternals.updateMemoryGraph([incoming('second','患者空腹血糖为 7 mmol/L。',{families:['CS'],episode_id:'session-2',event_time:'2025-02-01'})],first.nodes,first.edges,{subject_id:'graph-patient'});
+  assert.equal(second.nodes[0].operation,'NOOP');assert.equal(second.edges[0].relation_type,'persists');assert.equal(second.edges[0].persistent,true);
 });
 
-test('a repeated same-factor fact records persistence instead of inventing an update',()=>{
-  const route=(evidence_id,episode_id)=>({id:evidence_id,evidence_id,subject_id:'graph-patient',source_type:'patient',episode_id,source_session_id:episode_id,turn_id:'1',event_time:episode_id==='session-1'?'2025-01-01':'2025-02-01',text:'患者空腹血糖为 7。',certainty:1,polarity:'affirmed',families:['CS']});
-  const first=pipelineInternals.updatePatientGraph([route('e-1','session-1')],[],[],{subject_id:'graph-patient'}),second=pipelineInternals.updatePatientGraph([route('e-2','session-2')],first.nodes,first.edges,{subject_id:'graph-patient'});
-  assert.equal(second.nodes[0].operation,'NOOP');assert.equal(second.edges.length,1);assert.equal(second.edges[0].edge_family,'temporal');assert.equal(second.edges[0].relation_type,'persists');assert.equal(second.edges[0].status,'verified');
+test('same source occurrence is coalesced before persistence and keeps all family labels',()=>{
+  const first=incoming('llm','患者视物模糊。',{observation_id:'same-observation',span:[10,17],source_text:'患者视物模糊。',families:['PE']}),coverage=incoming('coverage','患者原话：患者视物模糊。',{observation_id:'same-observation',span:[10,17],source_text:'患者视物模糊。',families:['CS']});
+  const update=pipelineInternals.updateMemoryGraph([first,coverage],[],[],{subject_id:'graph-patient'});
+  assert.equal(update.nodes.length,1);assert.equal(update.nodes[0].memory_id,'llm');assert.deepEqual(update.nodes[0].families,['PE','CS']);assert.equal(update.edges.length,0);
 });
 
-test('a changed quantitative result remains in one factor chain but is an update, not persistence',()=>{
-  const route=(evidence_id,text,event_time)=>({id:evidence_id,evidence_id,subject_id:'graph-patient',source_type:'structured',episode_id:evidence_id,source_session_id:evidence_id,turn_id:'1',event_time,text,certainty:1,polarity:'affirmed',families:['CS']});
-  const first=pipelineInternals.updatePatientGraph([route('e-glucose-6','患者空腹血糖为 6。','2025-01-01')],[],[],{subject_id:'graph-patient'}),second=pipelineInternals.updatePatientGraph([route('e-glucose-9','患者空腹血糖为 9。','2025-02-01')],first.nodes,first.edges,{subject_id:'graph-patient'});
-  assert.equal(first.nodes[0].factor_key,second.nodes[0].factor_key);assert.equal(second.nodes[0].operation,'UPDATE');assert.equal(second.edges.length,1);assert.equal(second.edges[0].relation_type,'updates');
+test('explicit longitudinal wording produces verified resolves, recurs and supersedes edges',()=>{
+  const start=pipelineInternals.updateMemoryGraph([incoming('start','患者头痛开始出现。',{factor_key:'symptom:headache',event_time:'2025-01-01'})],[],[],{subject_id:'graph-patient'}),resolved=pipelineInternals.updateMemoryGraph([incoming('resolved','患者头痛已经消失。',{factor_key:'symptom:headache',episode_id:'session-2',event_time:'2025-02-01'})],start.nodes,start.edges,{subject_id:'graph-patient'}),recurred=pipelineInternals.updateMemoryGraph([incoming('recurred','患者头痛再次出现。',{factor_key:'symptom:headache',episode_id:'session-3',event_time:'2025-03-01'})],[...start.nodes,...resolved.nodes],[...start.edges,...resolved.edges],{subject_id:'graph-patient'}),oldPlan=pipelineInternals.updateMemoryGraph([incoming('old-plan','患者使用旧治疗方案。',{factor_key:'care:regimen',families:['CP'],event_time:'2025-01-01'})],[],[],{subject_id:'graph-patient'}),newPlan=pipelineInternals.updateMemoryGraph([incoming('new-plan','患者由旧治疗方案改为新治疗方案。',{factor_key:'care:regimen',families:['CP'],episode_id:'session-2',event_time:'2025-02-01'})],oldPlan.nodes,oldPlan.edges,{subject_id:'graph-patient'});
+  assert.equal(resolved.nodes[0].operation,'RESOLVE');assert.ok(resolved.edges.some(edge=>edge.relation_type==='resolves'));
+  assert.ok(recurred.edges.some(edge=>edge.relation_type==='recurs'));
+  assert.equal(newPlan.nodes[0].operation,'SUPERSEDE');assert.ok(newPlan.edges.some(edge=>edge.relation_type==='supersedes'));
+  for(const edge of [...resolved.edges,...recurred.edges,...newPlan.edges])validateMemoryEdge(edge);
 });
 
-test('a changed medication dose is an update, not a no-op',()=>{
-  const route=(evidence_id,text,event_time)=>({id:evidence_id,evidence_id,subject_id:'graph-patient',source_type:'patient',episode_id:evidence_id,source_session_id:evidence_id,turn_id:'1',event_time,text,certainty:1,polarity:'affirmed',families:['CS']});
-  const first=pipelineInternals.updatePatientGraph([route('e-dose-500','患者目前正在服用二甲双胍 500 mg。','2025-01-01')],[],[],{subject_id:'graph-patient'}),second=pipelineInternals.updatePatientGraph([route('e-dose-1000','患者目前正在服用二甲双胍 1000 mg。','2025-02-01')],first.nodes,first.edges,{subject_id:'graph-patient'});
-  assert.equal(first.nodes[0].factor_key,second.nodes[0].factor_key);assert.equal(second.nodes[0].operation,'UPDATE');assert.equal(second.edges.length,1);assert.equal(second.edges[0].relation_type,'updates');
+test('opposing same-moment facts conflict while later status is an update',()=>{
+  const first=pipelineInternals.updateMemoryGraph([incoming('yes','患者存在头痛。',{factor_key:'symptom:headache'})],[],[],{subject_id:'graph-patient'}),sameMoment=pipelineInternals.updateMemoryGraph([incoming('no','患者否认头痛。',{factor_key:'symptom:headache',polarity:'negated'})],first.nodes,first.edges,{subject_id:'graph-patient'}),later=pipelineInternals.updateMemoryGraph([incoming('later-no','患者目前没有头痛症状。',{factor_key:'symptom:headache',episode_id:'session-2',event_time:'2025-02-01',polarity:'negated'})],first.nodes,first.edges,{subject_id:'graph-patient'});
+  assert.equal(sameMoment.nodes[0].operation,'CONFLICT');assert.equal(sameMoment.edges[0].relation_type,'conflicts');
+  assert.equal(later.nodes[0].operation,'UPDATE');assert.equal(later.edges[0].relation_type,'updates');
 });
 
-test('a repeated conflicting assertion remains conflicted with the original opposing node',()=>{
-  const route=(evidence_id,text,source_type,polarity,event_time)=>({id:evidence_id,evidence_id,subject_id:'graph-patient',source_type,episode_id:evidence_id,source_session_id:evidence_id,turn_id:'1',event_time,text,certainty:1,polarity,families:['CS']});
-  const affirmed=pipelineInternals.updatePatientGraph([route('e-taking','患者正在服用二甲双胍。','patient','affirmed','2025-01-01')],[],[],{subject_id:'graph-patient'}),negated=pipelineInternals.updatePatientGraph([route('e-not-taking','患者没有服用二甲双胍。','doctor','negated','2025-02-01')],affirmed.nodes,affirmed.edges,{subject_id:'graph-patient'}),repeated=pipelineInternals.updatePatientGraph([route('e-not-taking-repeat','患者没有服用二甲双胍。','doctor','negated','2025-03-01')],[...affirmed.nodes,...negated.nodes],[...affirmed.edges,...negated.edges],{subject_id:'graph-patient'});
-  assert.equal(negated.nodes[0].operation,'CONFLICT');assert.equal(negated.nodes[0].conflicts_with,affirmed.nodes[0].state_id);
-  assert.equal(repeated.nodes[0].operation,'CONFLICT');assert.equal(repeated.nodes[0].status,'conflict');assert.equal(repeated.nodes[0].predecessor_state_id,negated.nodes[0].state_id);assert.equal(repeated.nodes[0].conflicts_with,affirmed.nodes[0].state_id);
-  assert.equal(repeated.edges.length,1);assert.equal(repeated.edges[0].relation_type,'conflicts');assert.equal(repeated.edges[0].from_state_id,repeated.nodes[0].state_id);assert.equal(repeated.edges[0].to_state_id,affirmed.nodes[0].state_id);
+test('relation verifier rejects unsupported causal proposals and cross-factor links',()=>{
+  const from={...incoming('from','患者空腹血糖为 7 mmol/L。',{factor_key:'measurement:glucose'}),subject_id:'graph-patient'},to={...incoming('to','患者空腹血糖为 9 mmol/L。',{factor_key:'measurement:glucose',episode_id:'session-2',event_time:'2025-02-01'}),subject_id:'graph-patient'},other={...incoming('other','患者近期睡眠变差。',{factor_key:'symptom:sleep'}),subject_id:'graph-patient'};
+  assert.deepEqual(inspectLongitudinalRelation(from,to,'updates').grounded,true);
+  assert.deepEqual(inspectLongitudinalRelation(from,to,'contributes_to').grounded,false);
+  assert.deepEqual(inspectLongitudinalRelation(from,other).reasons,['different_clinical_factor']);
+  assert.deepEqual(inspectLongitudinalRelation(from,{...to,source_text:null,span:null}).reasons,['ungrounded_endpoint']);
 });
 
-test('optimistic graph revision rejects a stale concurrent version calculation',async()=>{
-  const store=new Store(':memory:'),outer=new Pipeline(store),competing=new Pipeline(store);let injected=false;
-  await assert.rejects(()=>outer.run(observation('我正在服用二甲双胍。','session-1','2025-01-01'),{phase:'memory_build',breakpoint:async({traces})=>{if(!injected&&traces.at(-1)?.component==='patient_graph_updater'){injected=true;await competing.run(observation('我已经停用二甲双胍。','session-2','2025-02-01'),{phase:'memory_build'});}}}),/changed concurrently/);
-  const graph=store.patientGraphFor('graph-patient');assert.ok(graph.nodes.length>0);assert.ok(graph.nodes.every(node=>node.episode_id==='session-2'));assert.equal(store.listRuns().filter(run=>run.status==='failed').length,1);store.close();
+test('a complete high-confidence source-grounded care proposal becomes a verified persistent edge',()=>{
+  const lab=incoming('lab','患者 HbA1c 为 9.2%。',{families:['CS'],event_time:'2025-01-01'}),plan=incoming('plan','医生基于 HbA1c 9.2% 的结果调整了胰岛素方案。',{source_type:'doctor',families:['CP'],episode_id:'session-2',event_time:'2025-02-01'}),update=updateMemoryGraph([plan],[lab],[],{subject_id:'graph-patient'},{relationProposals:[relationProposal('lab','plan','informs')]}),edge=update.edges.find(item=>item.source==='llm_source_grounded_relation_classifier');
+  assert.ok(edge);assert.equal(edge.edge_family,'clinical_care');assert.equal(edge.relation_type,'informs');assert.deepEqual(edge.support_memory_ids,['lab','plan']);assert.equal(edge.confidence,.93);assert.equal(edge.support_kind,'asserted');assert.equal(edge.status,'verified');assert.equal(edge.verified,true);assert.equal(edge.persistent,true);assert.equal(edge.causal_claim,false);validateMemoryEdge(edge);
 });
 
-test('monotonic graph revision rejects clear-and-rebuild ABA with the same graph size',async()=>{
-  const store=new Store(':memory:'),seed=new Pipeline(store),outer=new Pipeline(store),competing=new Pipeline(store);await seed.run(observation('我正在服用二甲双胍。','session-1','2025-01-01'),{phase:'memory_build'});const before=store.graphRevisionFor('graph-patient');let injected=false;
-  await assert.rejects(()=>outer.run(observation('我的空腹血糖为 8。','session-3','2025-03-01'),{phase:'memory_build',breakpoint:async({traces})=>{if(!injected&&traces.at(-1)?.component==='patient_graph_updater'){injected=true;store.clearMemory('graph-patient');await competing.run(observation('我已经停用二甲双胍。','session-2','2025-02-01'),{phase:'memory_build'});}}}),/changed concurrently/);
-  assert.notEqual(store.graphRevisionFor('graph-patient'),before);assert.ok(store.patientGraphFor('graph-patient').nodes.every(node=>node.episode_id==='session-2'));store.close();
+test('care-family grounding works even when endpoint vocabulary does not overlap',()=>{
+  const assessment=incoming('assessment','患者检查结果异常。',{families:['CS'],event_time:'2025-01-01'}),plan=incoming('care-plan','医生因此调整治疗方案。',{source_type:'doctor',families:['CP'],episode_id:'session-2',event_time:'2025-02-01'}),update=updateMemoryGraph([plan],[assessment],[],{subject_id:'graph-patient'},{relationProposals:[relationProposal('assessment','care-plan','informs')]});
+  assert.ok(update.edges.some(edge=>edge.source==='llm_source_grounded_relation_classifier'&&edge.relation_type==='informs'));
 });
 
-test('checkpoint restore validates every patient binding before deleting the current graph',async()=>{
-  const store=new Store(':memory:'),pipeline=new Pipeline(store);await pipeline.run(observation('我正在服用二甲双胍。','session-1','2025-01-01'),{phase:'memory_build'});store.saveMemoryCheckpoint({benchmark:'test',subject_id:'graph-patient',scope_key:'tamper-check',session_no:1,prefix_hash:'prefix',experiment_id:'test-experiment'});const checkpoint=store.getMemoryCheckpoint({benchmark:'test',subject_id:'graph-patient',scope_key:'tamper-check',session_no:1,prefix_hash:'prefix'}),before=structuredClone(store.patientGraphFor('graph-patient'));checkpoint.states[0].state.subject_id='other-patient';assert.throws(()=>store.restoreMemoryCheckpoint(checkpoint),/cross-patient/);assert.deepEqual(store.patientGraphFor('graph-patient'),before);store.close();
+test('Pipeline sends bounded pairs to the relation model and persists only its verified proposal',async()=>{
+  const relationGateway={config:{provider:'live-test',model:'relation-test'},publicConfig(){return this.config;},async completeJSON(component,input,validator){const raw={relations:input.candidates.map(candidate=>({candidate_id:candidate.candidate_id,relation_type:'informs',confidence:.95,reason:'后续医生原文明示依据该 HbA1c 检查结果调整方案。'}))};return{value:validator(raw),trace:{component,model:'relation-test',model_input:input,raw_model_response:JSON.stringify(raw),parsed_response:raw}};}},store=new Store(':memory:'),pipeline=new Pipeline(store,{componentGateways:{relation_classifier:relationGateway}});
+  await pipeline.run(observation('患者 HbA1c 为 9.2%。','session-1','2025-01-01','structured'),{phase:'memory_build'});
+  const second=await pipeline.run(observation('医生基于 HbA1c 9.2% 的检查结果调整胰岛素方案。','session-2','2025-02-01','doctor'),{phase:'memory_build'}),relationTrace=second.traces.find(trace=>trace.component==='memory_relation_classifier'),edge=store.memoryEdgesFor('graph-patient').find(item=>item.source==='llm_source_grounded_relation_classifier');
+  assert.ok(relationTrace);assert.equal(relationTrace.output.candidate_count>0,true);assert.equal(relationTrace.gateway.model_input.candidates.every(candidate=>!Object.hasOwn(candidate,'gold')),true);
+  assert.ok(edge);assert.equal(edge.relation_type,'informs');assert.equal(edge.edge_family,'clinical_care');assert.equal(edge.status,'verified');assert.equal(edge.causal_claim,false);store.close();
+});
+
+test('Pipeline keeps source-grounded Memory Nodes when the optional relation classifier fails',async()=>{
+  const relationGateway={config:{provider:'live-test',model:'relation-test'},publicConfig(){return this.config;},async completeJSON(){const error=new Error('relation output invalid');throw Object.assign(error,{gatewayTrace:{component:'relation_classifier',input:{},error:{kind:'schema_error',message:error.message,validation_errors:['invalid relation']}}});}},store=new Store(':memory:'),pipeline=new Pipeline(store,{componentGateways:{relation_classifier:relationGateway}});
+  await pipeline.run(observation('患者 HbA1c 为 9.2%。','session-1','2025-01-01','structured'),{phase:'memory_build'});
+  const second=await pipeline.run(observation('医生基于 HbA1c 9.2% 的结果调整了胰岛素方案。','session-2','2025-02-01','doctor'),{phase:'memory_build'}),trace=second.traces.find(item=>item.component==='memory_relation_classifier');
+  assert.equal(second.status,'completed');assert.equal(trace.status,'failed');assert.equal(trace.output.degraded,true);assert.equal(store.memoryNodesFor('graph-patient').some(node=>node.episode_id==='session-2'),true);store.close();
+});
+
+test('LLM proposals are rejected when provenance, support, confidence, family, type or non-causal contract is invalid',()=>{
+  const lab=incoming('lab','患者 HbA1c 为 9.2%。',{families:['CS'],event_time:'2025-01-01'}),plan=incoming('plan','医生基于 HbA1c 9.2% 的结果调整了胰岛素方案。',{source_type:'doctor',families:['CP'],episode_id:'session-2',event_time:'2025-02-01'}),base=relationProposal('lab','plan','informs'),invalid=[
+    {...base,source:'another_classifier'},
+    {...base,causal_claim:true},
+    {...base,support_memory_ids:['plan','lab']},
+    {...base,edge_family:'temporal'},
+    {...base,confidence:.84},
+    {...base,relation_type:'contributes_to'},
+    {...base,relation_type:'co_observed'},
+    {...base,relation_type:'causes'},
+    {...base,causal:true},
+    {...base,candidate_id:''},
+    {...base,to_memory_id:'missing',support_memory_ids:['lab','missing']}
+  ];
+  for(const proposal of invalid){const update=updateMemoryGraph([plan],[lab],[],{subject_id:'graph-patient'},{relationProposals:[proposal]});assert.equal(update.edges.some(edge=>edge.source==='llm_source_grounded_relation_classifier'),false,JSON.stringify(proposal));}
+  const crossPatient={...lab,subject_id:'another-patient'},cross=updateMemoryGraph([plan],[crossPatient],[],{subject_id:'graph-patient'},{relationProposals:[base]});assert.equal(cross.edges.some(edge=>edge.source==='llm_source_grounded_relation_classifier'),false);
+  const ungrounded={...lab,source_text:null,span:null},missingSource=updateMemoryGraph([plan],[ungrounded],[],{subject_id:'graph-patient'},{relationProposals:[base]});assert.equal(missingSource.edges.some(edge=>edge.source==='llm_source_grounded_relation_classifier'),false);
+});
+
+test('LLM longitudinal proposals require exact deterministic agreement',()=>{
+  const active=incoming('active','患者头痛持续存在。',{factor_key:'symptom:headache',event_time:'2025-01-01'}),resolved=incoming('resolved-by-source','患者头痛已经消失。',{factor_key:'symptom:headache',episode_id:'session-2',event_time:'2025-02-01'}),update=updateMemoryGraph([resolved],[active],[],{subject_id:'graph-patient'},{relationProposals:[relationProposal('active','resolved-by-source','updates')]});
+  assert.ok(update.edges.some(edge=>edge.relation_type==='resolves'&&edge.source==='source_grounded_memory_transition'));
+  assert.equal(update.edges.some(edge=>edge.source==='llm_source_grounded_relation_classifier'),false);
+});
+
+test('followed_by requires strict chronology and clinically related candidate endpoints',()=>{
+  const treatment=incoming('treatment','患者开始使用 DPP-4 抑制剂。',{families:['CP'],event_time:'2025-01-01'}),response=incoming('response','患者使用 DPP-4 抑制剂后复查血糖。',{families:['CS'],episode_id:'session-2',event_time:'2025-02-01'}),accepted=updateMemoryGraph([response],[treatment],[],{subject_id:'graph-patient'},{relationProposals:[relationProposal('treatment','response','followed_by')]}),edge=accepted.edges.find(item=>item.source==='llm_source_grounded_relation_classifier');
+  assert.ok(edge);assert.equal(edge.relation_type,'followed_by');assert.equal(edge.edge_family,'temporal');validateMemoryEdge(edge);
+  const sameTime={...response,event_time:'2025-01-01'},notOrdered=updateMemoryGraph([sameTime],[treatment],[],{subject_id:'graph-patient'},{relationProposals:[relationProposal('treatment','response','followed_by')]});assert.equal(notOrdered.edges.some(item=>item.source==='llm_source_grounded_relation_classifier'),false);
+  const unrelated=incoming('unrelated','患者家庭住址发生变化。',{families:['BC'],episode_id:'session-2',event_time:'2025-02-01'}),notRelated=updateMemoryGraph([unrelated],[treatment],[],{subject_id:'graph-patient'},{relationProposals:[relationProposal('treatment','unrelated','followed_by')]});assert.equal(notRelated.edges.some(item=>item.source==='llm_source_grounded_relation_classifier'),false);
+});
+
+test('backfilled events do not replace a later current Memory Node',()=>{
+  const latest=pipelineInternals.updateMemoryGraph([incoming('latest','患者空腹血糖为 9 mmol/L。',{families:['CS'],episode_id:'session-3',event_time:'2025-03-01'})],[],[],{subject_id:'graph-patient'}),backfill=pipelineInternals.updateMemoryGraph([incoming('old','患者空腹血糖为 7 mmol/L。',{families:['CS'],event_time:'2025-01-01'})],latest.nodes,latest.edges,{subject_id:'graph-patient'}),current=pipelineInternals.currentMemory([...latest.nodes,...backfill.nodes]);
+  assert.equal(current.length,1);assert.equal(current[0].memory_id,'latest');
+});
+
+test('checkpoints restore the same unified nodes and edges',async()=>{
+  const store=new Store(':memory:'),pipeline=new Pipeline(store);await pipeline.run(observation('患者目前空腹血糖为 7 mmol/L。','session-1','2025-01-01','structured'),{phase:'memory_build'});await pipeline.run(observation('患者目前空腹血糖为 9 mmol/L。','session-2','2025-02-01','structured'),{phase:'memory_build'});
+  const before=structuredClone(store.memoryGraphFor('graph-patient'));store.saveMemoryCheckpoint({benchmark:'test',subject_id:'graph-patient',scope_key:'unified-v14',session_no:2,prefix_hash:'prefix',experiment_id:'test'});const checkpoint=store.getMemoryCheckpoint({benchmark:'test',subject_id:'graph-patient',scope_key:'unified-v14',session_no:2,prefix_hash:'prefix'});
+  store.clearMemory('graph-patient');const restored=store.restoreMemoryCheckpoint(checkpoint),after=store.memoryGraphFor('graph-patient');assert.equal(restored.restored,before.nodes.length);assert.equal(restored.restored_edges,before.edges.length);assert.deepEqual(after.nodes,before.nodes);assert.deepEqual(after.edges,before.edges);store.close();
+});
+
+test('optimistic graph revision rejects a stale concurrent calculation',async()=>{
+  const store=new Store(':memory:'),outer=new Pipeline(store),competitor=new Pipeline(store);let injected=false;
+  await assert.rejects(()=>outer.run(observation('患者目前空腹血糖为 7 mmol/L。','session-1','2025-01-01','structured'),{phase:'memory_build',breakpoint:async({traces})=>{if(!injected&&traces.at(-1)?.component==='memory_graph_updater'){injected=true;await competitor.run(observation('患者目前空腹血糖为 9 mmol/L。','session-2','2025-02-01','structured'),{phase:'memory_build'});}}}),/changed concurrently/);
+  assert.ok(store.memoryNodesFor('graph-patient').every(node=>node.episode_id==='session-2'));store.close();
 });

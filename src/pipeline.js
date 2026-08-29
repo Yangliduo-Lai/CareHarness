@@ -3,18 +3,23 @@ import { performance } from 'node:perf_hooks';
 import { ModelGateway } from './gateway.js';
 import { communicationActionRequirements } from './prompts.js';
 import { buildVersion } from './version.js';
-import { STATE_FAMILIES, validateAction, validateEvidence, validateObservation, validatePatientGraphEdge, validateState, validateStateDelta } from './schema.js';
+import { inspectMemoryNodeSourceAlignment, isAnswerableMemoryNode, validateAction, validateMemoryDelta, validateMemoryEdge, validateMemoryNode, validateObservation } from './schema.js';
 import { transcriptBlocks,transcriptContextForSpan } from './session-observation.js';
+import { bindSemanticSupport,buildSemanticContextUnits,semanticExtractorInput } from './semantic-state-builder.js';
+import { currentMemory,familyCounts,genericTextSimilarity,memoryTopicKey,normalizeMemoryText,updateMemoryGraph } from './memory-graph-updater.js';
+import { classifyMemoryRelations,MEMORY_RELATION_CLASSIFIER_VERSION } from './memory-relation-classifier.js';
+import { attachRouterWarnings,materializeEmptyMemoryTags,normalizeMemoryTagsOutput,tagMemoryNodes,tagMemoryWithFallback,validateMemoryTags } from './memory-family-tagger.js';
 
 const DESCRIPTIONS = {
   observation_ingest:'校验并固定 benchmark 共有的患者、来源、session、turn、时间与原文；query 和评分字段不会进入核心系统。',
-  atomic_evidence_extractor:'在完整 Session 语境中筛选值得长期保留的事实，过滤寒暄、安慰和重复表达，再拆分并语义重写为原子 Evidence。', multi_label_router:'把每条原子事实分配给一个或多个 State family；重复 family 会被确定性去除并记录 warning。',
-  patient_graph_updater:'在同一张持久化 Patient Graph 中创建 BC/PE/PA/CS/CP/LO typed nodes，并写入带 Evidence、置信度和验证状态的 temporal / clinical-care edges。',
-  action_policy:'直接根据当前 Patient 消息和六类 State 的当前记忆选择结构化行动。',
-  response_generator:'只表达 Action Policy 已选择的行动，并遵守当前可见 State/Evidence 边界。',
+  memory_node_extractor:'在完整 Session 语境中抽取原子 Memory Node；节点同时保留原文、规范化内容、来源、时间和不确定性。', multi_family_tagger:'为每个 Memory Node 添加一个或多个 BC/PE/PA/CS/CP/LO family 标签；标签是同一节点的属性，不复制节点。',
+  memory_relation_classifier:'只在代码有界预筛出的同患者、原文对齐节点对之间，判断高置信的非因果纵向或照护关系；同 Session 共现本身不是关系。',
+  memory_graph_updater:'把 Memory Node 直接写入持久化 Memory Graph，并建立版本与照护关系边。',
+  action_policy:'直接根据当前 Patient 消息和统一 Memory Graph 选择结构化行动。',
+  response_generator:'只表达 Action Policy 已选择的行动，并遵守当前可见 Memory Node 边界。',
   response_auditor:'检查回复是否遵守 Action Policy 和证据边界。',
   memory_commit:'历史 profile/对话只更新记忆，不生成 Doctor Agent 回复。',
-  patient_memory_commit:'在任何回复生成前，先提交本轮 Patient observation、Evidence 和 State；后续回复失败也不丢失患者输入。',
+  patient_memory_commit:'在任何回复生成前，先提交本轮 Patient observation 和 Memory Node；后续回复失败也不丢失患者输入。',
   conversation_commit:'提交通过 Auditor 的 Doctor Agent 回复；阶段 2 编排器随后将其作为下一条 doctor observation 写回记忆。'
 };
 
@@ -25,10 +30,10 @@ export class Pipeline {
   async preprocess(rawObservation) {
     const observation=validateObservation(rawObservation),prepared={observation};
     try {
-      const extracted=await extractEvidenceWithRecovery(this.gatewayFor('extractor'),observation);
-      attachEvidenceWarnings(extracted);prepared.evidence=extracted.value;prepared.extractorTrace=extracted.trace;
-      prepared.routerInput=prepared.evidence.map((item,index)=>({id:String(index),text:item.text,source:item.source_type}));
-      const routed=await routeWithFallback(this.gatewayFor('router'),prepared.routerInput,prepared.evidence,observation);
+      const extracted=await extractMemoryNodesWithRecovery(this.gatewayFor('extractor'),observation);
+      attachMemoryWarnings(extracted);prepared.memory_nodes=extracted.value;prepared.extractorTrace=extracted.trace;
+      prepared.routerInput=prepared.memory_nodes.map((item,index)=>({id:String(index),text:item.text,source:item.source_type}));
+      const routed=await tagMemoryWithFallback(this.gatewayFor('router'),prepared.routerInput,prepared.memory_nodes,observation);
       attachRouterWarnings(routed);
       prepared.routes=routed.value;prepared.routerTrace=routed.trace;
     } catch(error) { prepared.error=error; }
@@ -53,47 +58,64 @@ export class Pipeline {
     try {
       const packet=step('observation_ingest',rawObservation,observation);
       await breakpoint();
-      if(prepared?.error&&!prepared.evidence)throw prepared.error;
-      const extracted=prepared?{value:prepared.evidence,trace:prepared.extractorTrace}:await extractEvidenceWithRecovery(this.gatewayFor('extractor'),packet);
-      attachEvidenceWarnings(extracted);
-      const evidence=step('atomic_evidence_extractor',{model_input:packet.raw_text,code_context:{observation_id:packet.observation_id,source_type:packet.source_type}},extracted.value,'completed',extracted.trace);
+      if(prepared?.error&&!prepared.memory_nodes)throw prepared.error;
+      const extracted=prepared?quarantineUnalignedMemoryNodes({value:prepared.memory_nodes,trace:prepared.extractorTrace},packet):await extractMemoryNodesWithRecovery(this.gatewayFor('extractor'),packet);
+      attachMemoryWarnings(extracted);
+      const extractedNodes=step('memory_node_extractor',{model_input:packet.raw_text,code_context:{observation_id:packet.observation_id,source_type:packet.source_type}},extracted.value,'completed',extracted.trace);
       await breakpoint();
       if(prepared?.error)throw prepared.error;
-      const routerInput=prepared?.routerInput||evidence.map((item,index)=>({id:String(index),text:item.text,source:item.source_type}));
-      const routedResult=prepared?{value:prepared.routes,trace:prepared.routerTrace}:await routeWithFallback(this.gatewayFor('router'),routerInput,evidence,observation);
+      const preparedRoutesReusable=Boolean(prepared)&&extractedNodes.length===prepared.memory_nodes.length&&extractedNodes.every((node,index)=>node.memory_id===prepared.memory_nodes[index]?.memory_id),routerInput=preparedRoutesReusable?prepared.routerInput:extractedNodes.map((item,index)=>({id:String(index),text:item.text,source:item.source_type}));
+      const routedResult=preparedRoutesReusable?{value:prepared.routes,trace:prepared.routerTrace}:await tagMemoryWithFallback(this.gatewayFor('router'),routerInput,extractedNodes,observation);
       attachRouterWarnings(routedResult);
-      const routes=step('multi_label_router',routerInput,routedResult.value,'completed',routedResult.trace);
+      const taggedNodes=step('multi_family_tagger',routerInput,routedResult.value,'completed',routedResult.trace);
       await breakpoint();
-      const graphSnapshot=readPatientGraphSnapshot(this.store,observation.subject_id),historical=graphSnapshot.nodes,historicalEdges=graphSnapshot.edges;
-      const graphInput={routes,graph:{node_count:historical.length,edge_count:historicalEdges.length,typed_node_counts:familyCounts(historical)}};
+      const graphSnapshot=readMemoryGraphSnapshot(this.store,observation.subject_id),historical=graphSnapshot.nodes,historicalEdges=graphSnapshot.edges;
+      const graphInput={memory_nodes:taggedNodes,graph:{node_count:historical.length,edge_count:historicalEdges.length,family_counts:familyCounts(historical)}};
+      let graphPreview;
+      try{
+        graphPreview=updateMemoryGraph(taggedNodes,historical,historicalEdges,observation);
+        graphPreview.nodes.forEach(validateMemoryNode);graphPreview.edges.forEach(validateMemoryEdge);graphPreview.deltas.forEach(validateMemoryDelta);
+      }catch(error){const failure={kind:'schema_error',message:String(error.message),validation_errors:error.errors||[],suggestion:'Inspect Memory Node invariants before relation classification; every semantic fact must remain source-grounded and patient-specific.'};step('memory_graph_updater',graphInput,null,'failed',null,failure);throw Object.assign(error,{publicError:{step:'memory_graph_updater',input:graphInput,raw_model_output:'',parsed_output:null,validation_errors:error.errors||[],message:String(error.message),suggestion:failure.suggestion}});}
+      const relationInput={incoming_memory_ids:graphPreview.nodes.map(node=>node.memory_id),historical_node_count:historical.length,historical_edge_count:historicalEdges.length,candidate_policy:'bounded_same-patient_source-grounded_pairs_only'};
+      let classifiedRelations;
+      try{
+        classifiedRelations=await classifyMemoryRelations(this.gatewayFor('relation_classifier'),graphPreview.nodes,historical);
+        const relationOutput={version:classifiedRelations.version,candidate_count:classifiedRelations.candidates.length,decisions:classifiedRelations.decisions,relation_proposals:classifiedRelations.relationProposals,degraded:false};
+        step('memory_relation_classifier',relationInput,relationOutput,'completed',classifiedRelations.trace);
+      }catch(error){
+        const gatewayTrace=error.gatewayTrace||null,failure=gatewayTrace?.error||{kind:'relation_classifier_error',message:String(error.message||error),validation_errors:error.errors||[],suggestion:'Memory Nodes remain valid; continue without optional persistent relation proposals.'};
+        classifiedRelations={version:MEMORY_RELATION_CLASSIFIER_VERSION,candidates:[],decisions:[],relationProposals:[],trace:gatewayTrace};
+        step('memory_relation_classifier',relationInput,{version:MEMORY_RELATION_CLASSIFIER_VERSION,candidate_count:0,decisions:[],relation_proposals:[],degraded:true,fallback:'continue_without_optional_relation_proposals'},'failed',gatewayTrace,failure);
+      }
+      await breakpoint();
       let graphDelta;
       try{
-        graphDelta=updatePatientGraph(routes,historical,historicalEdges,observation);
-        graphDelta.nodes.forEach(validateState);graphDelta.edges.forEach(validatePatientGraphEdge);graphDelta.deltas.forEach(validateStateDelta);
-      }catch(error){const failure={kind:'schema_error',message:String(error.message),validation_errors:error.errors||[],suggestion:'Inspect routed Evidence and Patient Graph node/edge invariants; every node and edge must remain patient-specific and Evidence-bound.'};step('patient_graph_updater',graphInput,null,'failed',null,failure);throw Object.assign(error,{publicError:{step:'patient_graph_updater',input:graphInput,raw_model_output:'',parsed_output:null,validation_errors:error.errors||[],message:String(error.message),suggestion:failure.suggestion}});}
+        graphDelta=updateMemoryGraph(graphPreview.nodes,historical,historicalEdges,observation,{relationProposals:classifiedRelations.relationProposals});
+        graphDelta.nodes.forEach(validateMemoryNode);graphDelta.edges.forEach(validateMemoryEdge);graphDelta.deltas.forEach(validateMemoryDelta);
+      }catch(error){const failure={kind:'schema_error',message:String(error.message),validation_errors:error.errors||[],suggestion:'Inspect Memory Node and Memory Edge invariants; every fact, family label and provenance field must live on one patient-specific node.'};step('memory_graph_updater',graphInput,null,'failed',null,failure);throw Object.assign(error,{publicError:{step:'memory_graph_updater',input:graphInput,raw_model_output:'',parsed_output:null,validation_errors:error.errors||[],message:String(error.message),suggestion:failure.suggestion}});}
       const built=graphDelta.nodes,builtEdges=graphDelta.edges,deltas=graphDelta.deltas;
-      step('patient_graph_updater',graphInput,graphDelta);
+      step('memory_graph_updater',graphInput,graphDelta);
       await breakpoint();
       const memory=currentMemory([...historical,...built]);
-      const patientGraph={version:'careharness-patient-graph.v1',subject_id:observation.subject_id,node_count:historical.length+built.length,edge_count:historicalEdges.length+builtEdges.length,typed_node_counts:familyCounts([...historical,...built]),delta:{node_ids:built.map(node=>node.state_id),edge_ids:builtEdges.map(edge=>edge.edge_id)}};
+      const memoryGraph={version:'careharness-memory-graph.v2-semantic-state',subject_id:observation.subject_id,node_count:historical.length+built.length,edge_count:historicalEdges.length+builtEdges.length,episode_membership_count:new Set([...historical,...built].map(node=>String(node.episode_id||'')).filter(Boolean)).size,family_counts:familyCounts([...historical,...built]),delta:{memory_ids:built.map(node=>node.memory_id),edge_ids:builtEdges.map(edge=>edge.edge_id),episode_memberships:graphDelta.episode_memberships}};
       const isMock=[this.gateway,...Object.values(this.componentGateways)].every(g=>g.config.provider==='mock');
       if(phase==='memory_build'){
-        const final={phase,observation,run_context:runContext,evidence,states:built,graph_edges:builtEdges,patient_graph:patientGraph,deltas,memory,response:null,version,mock:isMock};
+        const final={phase,observation,run_context:runContext,memory_nodes:built,memory_edges:builtEdges,memory_graph:memoryGraph,deltas,memory,response:null,version,mock:isMock};
         const commitInput={phase,observation_id:observation.observation_id,node_delta_count:deltas.length,edge_delta_count:builtEdges.length};let receipt=null;
-        try{if(run.branch_kind==='formal')receipt=this.store.commitMemory(run.id,observation,evidence,built,builtEdges,{expected_graph_revision:graphSnapshot.revision});}
+        try{if(run.branch_kind==='formal')receipt=this.store.commitMemory(run.id,observation,built,builtEdges,{expected_graph_revision:graphSnapshot.revision});}
         catch(error){const failure=memoryCommitFailure(error);step('memory_commit',commitInput,{committed:false},'failed',null,failure);throw Object.assign(error,{publicError:{step:'memory_commit',input:commitInput,raw_model_output:'',parsed_output:{committed:false},message:failure.message,suggestion:failure.suggestion}});}
-        step('memory_commit',commitInput,{committed:Boolean(receipt),receipt,next:'The versioned Patient Graph snapshot is ready for a future query.'});
+        step('memory_commit',commitInput,{committed:Boolean(receipt),receipt,next:'The versioned Memory Graph snapshot is ready for a future query.'});
         this.store.completeRun(run.id,final);
         return {...run,status:'completed',traces,final};
       }
       const patientCommitInput={observation_id:observation.observation_id,source_type:observation.source_type,node_delta_count:deltas.length,edge_delta_count:builtEdges.length};let patientReceipt=null;
-      try{if(run.branch_kind==='formal')patientReceipt=this.store.commitMemory(run.id,observation,evidence,built,builtEdges,{expected_graph_revision:graphSnapshot.revision});}
+      try{if(run.branch_kind==='formal')patientReceipt=this.store.commitMemory(run.id,observation,built,builtEdges,{expected_graph_revision:graphSnapshot.revision});}
       catch(error){const failure=memoryCommitFailure(error);step('patient_memory_commit',patientCommitInput,{committed:false,sequence:1},'failed',null,failure);throw Object.assign(error,{publicError:{step:'patient_memory_commit',input:patientCommitInput,raw_model_output:'',parsed_output:{committed:false},message:failure.message,suggestion:failure.suggestion}});}
-      const patientCommit=step('patient_memory_commit',patientCommitInput,{committed:Boolean(patientReceipt),receipt:patientReceipt,sequence:1,next:'Action Policy reads the Patient Graph after the Patient observation has been committed.'});
+      const patientCommit=step('patient_memory_commit',patientCommitInput,{committed:Boolean(patientReceipt),receipt:patientReceipt,sequence:1,next:'Action Policy reads the Memory Graph after the Patient observation has been committed.'});
       await breakpoint();
-      const action=step('action_policy',{current_patient_message:observation.raw_text,memory:compactStates(memory)},actionPolicy(observation,memory));validateAction(action);
+      const action=step('action_policy',{current_patient_message:observation.raw_text,memory:compactMemory(memory)},actionPolicy(observation,memory));validateAction(action);
       await breakpoint();
-      const generatorInput={action:action.type,current_patient_message:observation.raw_text,required_content:action.required_content,forbidden_content:action.forbidden_content,memory:compactStates(memory)};
+      const generatorInput={action:action.type,current_patient_message:observation.raw_text,required_content:action.required_content,forbidden_content:action.forbidden_content,memory:compactMemory(memory)};
       const genResult=await this.gatewayFor('generator').completeJSON('generator',generatorInput,x=>validateGenerated(normalizeGenerated(x,action)),()=>generateFromMemory(action,generatorInput));
       const generated=step('response_generator',generatorInput,genResult.value,'completed',genResult.trace);
       await breakpoint();
@@ -102,13 +124,13 @@ export class Pipeline {
       const audited=step('response_auditor',auditorInput,auditResult.value,auditResult.value.passed?'completed':'failed',auditResult.trace);
       await breakpoint();
       if(!audited.passed)throw Object.assign(new Error('Response blocked by Auditor'),{publicError:{step:'response_auditor',input:auditorInput,raw_model_output:auditResult.trace.raw_model_response,parsed_output:audited,suggestion:'Inspect the Action Policy constraints and regenerate the response.'}});
-      const final={phase,observation,run_context:runContext,evidence,states:built,graph_edges:builtEdges,patient_graph:patientGraph,deltas,memory,patient_memory_committed:patientCommit.committed,action,response:generated.response,audit:audited,response_evidence_ids:generated.citations,version,mock:isMock};
+      const final={phase,observation,run_context:runContext,memory_nodes:built,memory_edges:builtEdges,memory_graph:memoryGraph,deltas,memory,patient_memory_committed:patientCommit.committed,action,response:generated.response,audit:audited,response_memory_ids:generated.citations,version,mock:isMock};
       step('conversation_commit',{action:action.type,response:generated.response,branch_kind:run.branch_kind},{response_ready:true,doctor_memory_pending:run.branch_kind==='formal',sequence:2});
       this.store.completeRun(run.id,final);
       return {...run,status:'completed',traces,final};
     } catch(error) {
       if(error.gatewayTrace && traces.at(-1)?.status!=='failed'){
-        const names={extractor:'atomic_evidence_extractor',router:'multi_label_router',generator:'response_generator',auditor:'response_auditor',judge:'benchmark_judge'},component=names[error.gatewayTrace.component]||error.gatewayTrace.component;
+        const names={extractor:'memory_node_extractor',router:'multi_family_tagger',relation_classifier:'memory_relation_classifier',generator:'response_generator',auditor:'response_auditor',judge:'benchmark_judge'},component=names[error.gatewayTrace.component]||error.gatewayTrace.component;
         step(component,error.gatewayTrace.input,error.gatewayTrace.parsed_response||null,'failed',error.gatewayTrace,error.gatewayTrace.error);
       }
       const basePublicError=error.publicError ?? (error.gatewayTrace ? { step:error.gatewayTrace.component || 'pipeline', input:error.gatewayTrace.input || rawObservation,
@@ -122,72 +144,278 @@ export class Pipeline {
   }
 }
 
-function extractEvidence(o) {
-  const transcript=transcriptBlocks(o.raw_text),blocks=transcript.length?transcript:[{content_start:0,content_end:o.raw_text.length,source_type:o.source_type,turn_id:o.turn_id,event_time:o.event_time}],segments=[];
-  for(const block of blocks){const blockText=o.raw_text.slice(block.content_start,block.content_end),re=/[^。！？!?;；\n]+[。！？!?;；]?/gu;let match;while((match=re.exec(blockText))){const text=match[0].trim(),start=block.content_start+match.index;if(text.length>1)segments.push({text,start,end:start+text.length,source_type:block.source_type,turn_id:block.turn_id,event_time:block.event_time});}}
-  return segments.map(s=>validateEvidence({evidence_id:randomUUID(),observation_id:o.observation_id,subject_id:o.subject_id,text:s.text,source_text:o.raw_text.slice(s.start,s.end),span:[s.start,s.end],source_type:s.source_type,episode_id:o.episode_id,turn_id:s.turn_id,event_time:s.event_time,certainty:1,polarity:'affirmed'}));
+function extractMemoryNodes(o) {
+  return buildSemanticContextUnits(o).map(unit=>validateExtractedMemoryNode({memory_id:randomUUID(),observation_id:o.observation_id,subject_id:o.subject_id,text:unit.text,source_text:unit.source_text,span:[...unit.span],source_type:unit.source_type,episode_id:o.episode_id,turn_id:unit.turn_id,event_time:unit.event_time,certainty:1,polarity:inferSemanticPolarity(unit.text),support_unit_ids:[unit.unit_id],construction_kind:'fallback'}));
 }
 
-function isConversationalFiller(text){return(String(text).match(/[\p{L}\p{N}]/gu)||[]).length<2;}
+function validateExtractedMemoryNode(value){
+  for(const key of ['memory_id','observation_id','subject_id','text','source_type','episode_id'])if(typeof value?.[key]!=='string'||!value[key].trim())throw new Error(`extracted Memory Node requires ${key}`);
+  if(typeof value.certainty!=='number'||value.certainty<0||value.certainty>1)throw new Error('extracted Memory Node certainty must be 0..1');
+  if(!['affirmed','negated','uncertain'].includes(value.polarity))throw new Error('extracted Memory Node polarity is invalid');
+  return value;
+}
 
-function normalizeEvidenceOutput(value, observation) {
-  let items = Array.isArray(value?.evidence) ? value.evidence : Array.isArray(value) ? value : null;
-  if (items?.length === 1 && Array.isArray(items[0]?.atomic_evidence)) items = items[0].atomic_evidence;
-  if (!items && Array.isArray(value?.atomic_evidence)) items = value.atomic_evidence;
+function isConversationalFiller(text){
+  const value=String(text||'').trim();
+  if((value.match(/[\p{L}\p{N}]/gu)||[]).length<2)return true;
+  return /(?:不会|不再会|别怕).{0,12}(?:让|留)(?:你|您|患者).{0,10}(?:一个人|独自).{0,12}(?:黑暗里摸索|面对|承受)|(?:我|我们)会一直陪着(?:你|您|患者)/u.test(value);
+}
+
+function normalizeMemoryNodeOutput(value, observation) {
+  const items = Array.isArray(value?.memory_nodes) ? value.memory_nodes : null;
   if (!Array.isArray(items)) return value;
-  const evidence=[],warnings=[];
+  const memoryNodes=[],warnings=[],supportBindings=[],contextUnits=buildSemanticContextUnits(observation),visibleSourceText=contextUnits.map(unit=>unit.text).join('\n')||observation.raw_text;
   items.forEach((item, index) => {
-    const rawItem=item&&typeof item==='object'?item:{};
-    let rewritten=String(typeof item==='string'?item:rawItem.text||rawItem.statement||'').trim();
+    const rawItem=item&&typeof item==='object'?item:typeof item==='string'?{text:item}:{};
+    const rewritten=String(rawItem.text||'').trim();
     if(!rewritten){warnings.push({item_index:index,failure_reason:'missing_atomic_text'});return;}
     if(isConversationalFiller(rewritten,observation.source_type)){warnings.push({item_index:index,failure_reason:'filtered_non_memory_dialogue'});return;}
-    if(languageMismatch(observation.raw_text,rewritten))warnings.push({item_index:index,failure_reason:'output_language_mismatch',expected_language:dominantLanguage(observation.raw_text)});
-    evidence.push({
-      evidence_id: `${observation.observation_id}:llm:${index}`,
+    if(languageMismatch(visibleSourceText,rewritten))warnings.push({item_index:index,failure_reason:'output_language_mismatch',expected_language:dominantLanguage(visibleSourceText)});
+    const semanticBinding=bindSemanticSupport(rawItem,observation,contextUnits),quoteCandidate=rewritten.replace(/^(?:患者|医生)(?:原话|陈述|报告|建议|解释|评估|认为)?[：:]?/u,'').trim(),alignment=semanticBinding.explicit?null:locateContiguousQuote(observation.raw_text,quoteCandidate),span=semanticBinding.bound?semanticBinding.span:alignment?.span||null,context=semanticBinding.bound?semanticBinding:span?transcriptContextForSpan(observation.raw_text,span[0],span[1]):null,legacyUnit=semanticBinding.explicit||!span?null:contextUnits.filter(unit=>unit.span[0]<=span[0]&&unit.span[1]>=span[1]).sort((a,b)=>(a.span[1]-a.span[0])-(b.span[1]-b.span[0]))[0]||null,supportUnitIds=semanticBinding.bound?semanticBinding.support_unit_ids:legacyUnit?[legacyUnit.unit_id]:[];
+    if(semanticBinding.explicit&&!semanticBinding.bound)warnings.push({warning_type:'semantic_state_support_repair_required',item_index:index,failure_reason:'invalid_support_unit_binding',failure_reasons:semanticBinding.reasons,support_unit_ids:semanticBinding.support_unit_ids,repairable:true,answer_eligible:false});
+    else if(!span)warnings.push(alignmentWarning(index,rewritten,alignment?.failure_reason,alignment?.attempted_match_levels));
+    supportBindings.push({item_index:index,memory_id:`${observation.observation_id}:llm:${index}`,support_unit_ids:supportUnitIds,binding_mode:semanticBinding.bound?'context_unit':span?'legacy_contiguous_quote':'unbound',bound:Boolean(span),failure_reasons:semanticBinding.bound?[]:semanticBinding.explicit?semanticBinding.reasons:[alignment?.failure_reason].filter(Boolean)});
+    memoryNodes.push({
+      memory_id: `${observation.observation_id}:llm:${index}`,
       observation_id: observation.observation_id,
       subject_id: observation.subject_id,
       text: rewritten,
-      source_type: observation.source_type,
+      source_text:semanticBinding.bound?semanticBinding.source_text:span?observation.raw_text.slice(span[0],span[1]):null,
+      span:span||null,
+      source_type: context?.source_type||observation.source_type,
       episode_id: observation.episode_id,
-      source_session_id: observation.episode_id,
-      turn_id: observation.turn_id,
-      event_time: observation.event_time,
+      turn_id: context?.turn_id||observation.turn_id,
+      event_time: context?.event_time||observation.event_time,
       certainty: typeof rawItem.certainty === 'number' ? rawItem.certainty : 1,
-      polarity: ['affirmed','negated','uncertain'].includes(rawItem.polarity) ? rawItem.polarity : 'affirmed'
+      polarity: ['affirmed','negated','uncertain'].includes(rawItem.polarity) ? rawItem.polarity : inferSemanticPolarity(rewritten),
+      ...(supportUnitIds.length?{support_unit_ids:[...supportUnitIds]}:{}),construction_kind:'semantic'
     });
   });
-  Object.defineProperty(evidence,'warnings',{value:warnings,enumerable:false});
-  return evidence;
+  addExplicitMedicationStopCoverage(memoryNodes,warnings,observation);
+  Object.defineProperty(memoryNodes,'warnings',{value:warnings,enumerable:false});
+  Object.defineProperty(memoryNodes,'support_bindings',{value:supportBindings,enumerable:false});
+  return memoryNodes;
 }
 
-function normalizeAndValidateEvidence(value,observation){
-  const normalized=normalizeEvidenceOutput(value,observation);
+// The model owns extraction. This narrow guard only protects an explicitly
+// completed, first-person Chinese medication stop that is otherwise easy to
+// lose in a long Session. It deliberately abstains on advice, hypotheses,
+// uncertainty, reversals, corrections, third parties and reminder settings.
+function addExplicitMedicationStopCoverage(memoryNodes,warnings,observation){
+  const sources=extractMemoryNodes(observation).filter(item=>item.source_type==='patient');
+  let added=0;
+  for(const source of sources){
+    const sentence=source.text;
+    if(/(?:不对|说错|记错|其实(?:我)?没停|前面说错|等等.{0,8}没停|后来|之后|现在|今天|昨晚).{0,10}(?:又|重新|恢复|继续|再次|吃上|服用|用上|服上)/u.test(sentence))continue;
+    const match=/(?:所以)?我(?<time>这两天|这几天|最近|近期|前几天)把(?<drug>[^，。！？!?；;]{1,32}?)停了之后/u.exec(sentence);
+    if(!match)continue;
+    const drug=String(match.groups?.drug||'').trim();
+    if(!drug||/(?:提醒|群聊|讨论|功能|相关|包含|剂量|方案|建议|打算|考虑)/u.test(drug))continue;
+    if(/(?:可能|好像|也许|大概).{0,8}(?:停|没再服)/u.test(sentence))continue;
+    if(memoryNodes.some(item=>sameStoppedMedication(item.text,drug)))continue;
+    memoryNodes.push(validateExtractedMemoryNode({
+      memory_id:`${observation.observation_id}:coverage:status-change:${added++}`,
+      observation_id:observation.observation_id,subject_id:observation.subject_id,
+      text:`患者${match.groups.time}把${drug}停用。`,source_text:source.source_text,span:source.span,
+      source_type:source.source_type,episode_id:observation.episode_id,
+      turn_id:source.turn_id,event_time:source.event_time,certainty:1,polarity:'affirmed',
+      support_unit_ids:[...(source.support_unit_ids||[])],construction_kind:'fallback'
+    }));
+  }
+  if(added)warnings.push({warning_type:'coverage_guard_added',statuses:['stopped'],added_count:added,selection_basis:'explicit_completed_first_person_medication_stop'});
+}
+
+function sameStoppedMedication(text,drug){
+  const value=normalizeMemoryText(text),entity=normalizeMemoryText(drug);
+  return entity.length>1&&value.includes(entity)&&/(?:停用|停药|停止服用|不再服用|stoppedtaking|discontinued)/iu.test(String(text));
+}
+
+function inferSemanticPolarity(text){const value=String(text||'');if(/(?:可能|也许|似乎|不确定|怀疑|考虑|倾向|大概|probably|possibly|uncertain|suspect)/iu.test(value))return'uncertain';if(/(?:没有|并无|尚无|未见|否认|不再|没再|无明显|无任何|不是|从未|not|no\s|without|denies|never)/iu.test(value))return'negated';return'affirmed';}
+
+function normalizeAndValidateMemoryNodes(value,observation){
+  const normalized=normalizeMemoryNodeOutput(value,observation);
   if(!Array.isArray(normalized))return normalized;
-  const validated=normalized.map(validateEvidence);
+  const validated=normalized.map(validateExtractedMemoryNode);
   Object.defineProperty(validated,'warnings',{value:normalized.warnings||[],enumerable:false});
+  Object.defineProperty(validated,'support_bindings',{value:normalized.support_bindings||[],enumerable:false});
   return validated;
 }
-function attachEvidenceWarnings(result){if(result?.value?.warnings?.length&&result.trace)result.trace.validation_warnings=result.value.warnings;return result;}
-async function extractEvidenceWithRecovery(gateway,observation){
-  const validate=value=>normalizeAndValidateEvidence(value,observation);
-  try{return await gateway.completeJSON('extractor',observation.raw_text,validate,()=>extractEvidence(observation));}
+function attachMemoryWarnings(result){if(result?.value?.warnings?.length&&result.trace)result.trace.validation_warnings=result.value.warnings;if(result?.trace&&result?.value?.support_bindings?.length)result.trace.semantic_state_source_bindings=result.value.support_bindings;return result;}
+async function extractMemoryNodesWithRecovery(gateway,observation){
+  const validate=value=>normalizeAndValidateMemoryNodes(value,observation),extractorInput=semanticExtractorInput(observation),mockOutput=()=>({memory_nodes:buildSemanticContextUnits(observation).map(unit=>({text:unit.text,support_unit_ids:[unit.unit_id]}))});
+  const withSessionCoverage=result=>quarantineUnalignedMemoryNodes(transcriptBlocks(observation.raw_text).length?augmentExtractorCoverage(result,observation):result,observation);
+  try{const primary=await gateway.completeJSON('extractor',extractorInput,validate,mockOutput);return withSessionCoverage(await repairInvalidSemanticStates(gateway,observation,extractorInput,primary,validate));}
   catch(error){
     const trace=error?.gatewayTrace,attempts=Array.isArray(trace?.raw_model_attempts)?trace.raw_model_attempts:[];
     if(trace?.component!=='extractor'||trace?.error?.kind!=='truncated_output')throw error;
     let best=null;
     for(const attempt of attempts){
-      const recoveredPayload=recoverCompleteEvidencePrefix(attempt?.raw);
-      if(!recoveredPayload.evidence.length)continue;
-      try{const value=validate(recoveredPayload);if(!best||value.length>best.value.length)best={value,attempt:Number(attempt.attempt)||0,recovered_item_count:recoveredPayload.evidence.length};}catch{}
+      const recoveredPayload=recoverCompleteMemoryNodePrefix(attempt?.raw);
+      if(!recoveredPayload.memory_nodes.length)continue;
+      try{const value=validate(recoveredPayload);if(!best||value.length>best.value.length)best={value,attempt:Number(attempt.attempt)||0,recovered_item_count:recoveredPayload.memory_nodes.length};}catch{}
     }
     if(!best?.value.length)throw error;
-    best.value.warnings.push({warning_type:'truncated_extractor_prefix_recovered',recovery_policy:'validated_complete_evidence_items_only',source_attempt:best.attempt,recovered_item_count:best.recovered_item_count,accepted_evidence_count:best.value.length,discarded_incomplete_suffix:true});
-    return{value:best.value,trace:{...trace,finish_reason:'length_recovered',parsed_response:best.value,error:null,recovery:{mode:'validated_complete_evidence_prefix',source_attempt:best.attempt,recovered_item_count:best.recovered_item_count,accepted_evidence_count:best.value.length,discarded_incomplete_suffix:true}}};
+    best.value.warnings.push({warning_type:'truncated_extractor_prefix_recovered',recovery_policy:'validated_complete_memory_nodes_only',source_attempt:best.attempt,recovered_item_count:best.recovered_item_count,accepted_memory_node_count:best.value.length,discarded_incomplete_suffix:true});
+    const recovered={value:best.value,trace:{...trace,finish_reason:'length_recovered',parsed_response:best.value,error:null,recovery:{mode:'validated_complete_memory_node_prefix',source_attempt:best.attempt,recovered_item_count:best.recovered_item_count,accepted_memory_node_count:best.value.length,discarded_incomplete_suffix:true}}};
+    return withSessionCoverage(await repairInvalidSemanticStates(gateway,observation,extractorInput,recovered,validate));
   }
 }
-function recoverCompleteEvidencePrefix(raw){
-  const text=String(raw||''),match=/"evidence"\s*:\s*\[/u.exec(text);if(!match)return{evidence:[]};
-  const evidence=[];let objectStart=-1,depth=0,inString=false,escaped=false;
+
+async function repairInvalidSemanticStates(gateway,observation,extractorInput,result,validate){
+  const warnings=result?.value?.warnings||[],failures=warnings.filter(warning=>warning?.warning_type==='semantic_state_support_repair_required'),failedIds=new Set(failures.map(warning=>`${observation.observation_id}:llm:${warning.item_index}`));
+  if(!failures.length)return result;
+  const originalNodes=Array.isArray(result?.value)?result.value:[],validNodes=originalNodes.filter(node=>!failedIds.has(node.memory_id)),failedNodes=failures.map(warning=>{const node=originalNodes.find(item=>item.memory_id===`${observation.observation_id}:llm:${warning.item_index}`);return{text:String(node?.text||''),support_unit_ids:[...(warning.support_unit_ids||[])],failure_reasons:[...(warning.failure_reasons||[])]};}).filter(item=>item.text),baseBindings=(result?.value?.support_bindings||[]).filter(binding=>!failedIds.has(binding.memory_id));
+  const finish=(replacementNodes=[],replacementBindings=[],repairTrace={})=>{
+    const value=[...validNodes,...replacementNodes];
+    Object.defineProperty(value,'warnings',{value:[...warnings,...(repairTrace.validation_warnings||[])],enumerable:false});
+    Object.defineProperty(value,'support_bindings',{value:[...baseBindings,...replacementBindings],enumerable:false});
+    return{...result,value,trace:{...(result?.trace||{}),parsed_response:value,semantic_state_repair:{version:'careharness-semantic-state-repair.v1',failed_candidate_count:failures.length,...repairTrace}}};
+  };
+  if(!failedNodes.length)return finish([],[],{attempted:false,accepted_replacement_count:0,discarded_replacement_count:failures.length,skip_reason:'failed_candidate_text_unavailable'});
+  if(gateway?.config?.provider==='mock')return finish([],[],{attempted:false,accepted_replacement_count:0,discarded_replacement_count:failures.length,skip_reason:'mock_primary_output_is_code_generated'});
+  const repairInput={...extractorInput,repair_request:{mode:'replace_invalid_semantic_states',failed_nodes:failedNodes}};
+  try{
+    const repaired=await gateway.completeJSON('extractor',repairInput,validate,()=>({memory_nodes:[]})),repairWarnings=repaired?.value?.warnings||[],repairFailureIds=new Set(repairWarnings.filter(warning=>warning?.warning_type==='semantic_state_support_repair_required').map(warning=>`${observation.observation_id}:llm:${warning.item_index}`)),candidates=(Array.isArray(repaired?.value)?repaired.value:[]).filter(node=>!repairFailureIds.has(node.memory_id)&&Array.isArray(node.support_unit_ids)&&node.support_unit_ids.length&&inspectMemoryNodeSourceAlignment(node,observation).aligned).slice(0,failures.length),idMap=new Map(),replacementNodes=candidates.map((node,index)=>{const memory_id=`${observation.observation_id}:repair:${index}`;idMap.set(node.memory_id,memory_id);return{...node,memory_id};}),replacementBindings=(repaired?.value?.support_bindings||[]).filter(binding=>idMap.has(binding.memory_id)).map(binding=>({...binding,memory_id:idMap.get(binding.memory_id),repair_replacement:true})),discarded=Math.max(0,(Array.isArray(repaired?.value)?repaired.value.length:0)-replacementNodes.length);
+    return finish(replacementNodes,replacementBindings,{attempted:true,accepted_replacement_count:replacementNodes.length,discarded_replacement_count:discarded,gateway:repaired.trace,validation_warnings:repairWarnings.map(warning=>({...warning,repair_attempt:true}))});
+  }catch(error){
+    return finish([],[],{attempted:true,accepted_replacement_count:0,discarded_replacement_count:failures.length,error:{message:String(error?.message||error),kind:error?.gatewayTrace?.error?.kind||'repair_call_failed'},gateway:error?.gatewayTrace||null});
+  }
+}
+
+function quarantineUnalignedMemoryNodes(result,observation){
+  if(result?.trace?.source_alignment_gate)return result;
+  const input=Array.isArray(result?.value)?result.value:[],eligible=[],quarantined=[];
+  input.forEach((node,index)=>{
+    const report=inspectMemoryNodeSourceAlignment(node,observation);
+    if(report.aligned)eligible.push(node);else quarantined.push({item_index:index,memory_id:String(node?.memory_id||''),reasons:report.reasons});
+  });
+  const warnings=[...(result?.value?.warnings||[]),...quarantined.map(item=>({warning_type:'memory_node_quarantined_unaligned_source',item_index:item.item_index,memory_id:item.memory_id||null,failure_reasons:item.reasons,answer_eligible:false}))],reasonCounts={};
+  for(const item of quarantined)for(const reason of item.reasons)reasonCounts[reason]=(reasonCounts[reason]||0)+1;
+  Object.defineProperty(eligible,'warnings',{value:warnings,enumerable:false});
+  Object.defineProperty(eligible,'support_bindings',{value:(result?.value?.support_bindings||[]).filter(binding=>eligible.some(node=>node.memory_id===binding.memory_id)),enumerable:false});
+  return{...result,value:eligible,trace:{...(result?.trace||{}),parsed_response:eligible,source_alignment_gate:{version:'careharness-source-grounding-gate.v1',policy:'quarantine_before_family_tagging_and_active_graph_write',inspected_memory_node_count:input.length,eligible_memory_node_count:eligible.length,quarantined_memory_node_count:quarantined.length,quarantined_memory_ids:quarantined.map(item=>item.memory_id).filter(Boolean),reason_counts:reasonCounts}}};
+}
+
+// A long Session can contain many distinct Patient disclosures and attributed
+// Doctor explanations. Even a faithful extractor may summarize only the most
+// salient few. Preserve a bounded, role-diverse lexical ledger directly from
+// the visible transcript so a later query can still retrieve an omitted fact.
+// This is benchmark-agnostic and never sees a query, Gold, or Judge metadata.
+function augmentExtractorCoverage(result,observation){
+  const supportBindings=result?.value?.support_bindings||[];
+  const sourceExtracted=Array.isArray(result?.value)?result.value.map(item=>({...item,span:Array.isArray(item.span)?[...item.span]:item.span||null})):[],deduplicated=deduplicateExtractedMemoryNodes(sourceExtracted),extracted=deduplicated.nodes;
+  const candidates=coverageLedgerCandidates(observation),accepted=[],citedUnitIds=new Set(extracted.flatMap(node=>node.support_unit_ids||[]));let attached=0,skippedCitedUnit=0;
+  for(const candidate of candidates){
+    if(isConversationalFiller(candidate.text))continue;
+    if(candidate.support_unit_ids?.length&&candidate.support_unit_ids.every(id=>citedUnitIds.has(id))){skippedCitedUnit++;continue;}
+    const stoppedEntity=stoppedMedicationEntity(candidate.text);
+    if(stoppedEntity&&[...extracted,...accepted].some(item=>sameStoppedMedication(item.text,stoppedEntity)))continue;
+    const extractedIndex=extracted.findIndex(item=>clearlyEquivalentCoverageFact(item,candidate));
+    if(extractedIndex>=0){
+      if(!extracted[extractedIndex].source_text&&candidate.source_text){extracted[extractedIndex]=attachCoverageFragment(extracted[extractedIndex],candidate);attached++;}
+      continue;
+    }
+    if(accepted.some(item=>clearlyEquivalentCoverageFact(item,candidate)))continue;
+    accepted.push(candidate);
+  }
+  const value=[...extracted,...accepted];
+  Object.defineProperty(value,'warnings',{value:[...(result?.value?.warnings||[])],enumerable:false});
+  const retainedBindings=supportBindings.filter(binding=>value.some(node=>node.memory_id===binding.memory_id));
+  Object.defineProperty(value,'support_bindings',{value:retainedBindings,enumerable:false});
+  return{...result,value,trace:{...(result?.trace||{}),parsed_response:value,semantic_state_source_bindings:retainedBindings,coverage_ledger:{version:'careharness-visible-session-coverage-ledger.v4-complete-context-unit',policy:'supplement_only_uncited_high_value_complete_context_units',model_memory_node_count:sourceExtracted.length,model_duplicate_collapsed_count:deduplicated.collapsed,candidate_count:candidates.length,skipped_already_cited_context_unit_count:skippedCitedUnit,attached_source_fragment_count:attached,added_count:accepted.length,patient_added_count:accepted.filter(item=>item.source_type==='patient').length,doctor_added_count:accepted.filter(item=>item.source_type==='doctor').length,gold_or_judge_input_used:false}}};
+}
+
+function deduplicateExtractedMemoryNodes(nodes){
+  const kept=[];let collapsed=0;
+  for(const node of nodes){
+    const index=kept.findIndex(existing=>clearlyEquivalentCoverageFact(existing,node));
+    if(index<0){kept.push(node);continue;}
+    collapsed++;
+    if(!kept[index].source_text&&node.source_text)kept[index]=node;
+  }
+  return{nodes:kept,collapsed};
+}
+
+function coverageLedgerCandidates(observation){
+  const segments=buildSemanticContextUnits(observation).filter(item=>['patient','doctor'].includes(item.source_type)).map(unit=>({...unit,certainty:1,polarity:inferSemanticPolarity(unit.text),support_unit_ids:[unit.unit_id]})),byTurn=new Map();
+  for(const item of segments){
+    const scored=coverageLedgerScore(item);if(scored<=0)continue;
+    const key=`${item.source_type}\u0000${item.turn_id||''}`,group=byTurn.get(key)||[];group.push({...item,coverage_score:scored});byTurn.set(key,group);
+  }
+  for(const group of byTurn.values())group.sort((a,b)=>b.coverage_score-a.coverage_score||a.span[0]-b.span[0]);
+  const patient=roundRobinCoverage([...byTurn.entries()].filter(([key])=>key.startsWith('patient\u0000')).map(([,items])=>items),24,3),doctor=roundRobinCoverage([...byTurn.entries()].filter(([key])=>key.startsWith('doctor\u0000')).map(([,items])=>items),14,2),ordered=[...patient,...doctor].sort((a,b)=>a.span[0]-b.span[0]);
+  return ordered.map((item,index)=>validateExtractedMemoryNode({
+    memory_id:`${observation.observation_id}:coverage:${index}`,observation_id:observation.observation_id,
+    subject_id:observation.subject_id,text:item.text,
+    source_text:item.source_text,span:Array.isArray(item.span)?[...item.span]:null,
+    source_type:item.source_type,episode_id:observation.episode_id,
+    turn_id:item.turn_id,event_time:item.event_time,certainty:item.certainty,polarity:item.polarity,
+    support_unit_ids:[...(item.support_unit_ids||[])],construction_kind:'fallback'
+  }));
+}
+
+function attachCoverageFragment(node,candidate){
+  return{...node,source_text:candidate.source_text,span:Array.isArray(candidate.span)?[...candidate.span]:null,source_type:node.source_type==='structured'?candidate.source_type:node.source_type,turn_id:node.turn_id||candidate.turn_id,event_time:node.event_time||candidate.event_time,support_unit_ids:[...(candidate.support_unit_ids||[])]};
+}
+
+// Attachment deliberately requires a strong lexical match in the same visible
+// Session and refuses numeric, polarity or role conflicts. Ambiguous pairs stay
+// as separate Memory Nodes so coverage never erases a potentially distinct fact.
+function clearlyEquivalentCoverageFact(left,right){
+  if(!sameCoverageRole(left,right)||coveragePolarity(left)!==coveragePolarity(right)||coverageQuantitiesConflict(left,right))return false;
+  const leftTexts=coverageFactTexts(left),rightTexts=coverageFactTexts(right);let best=0,contained=false;
+  for(const a of leftTexts)for(const b of rightTexts){
+    if(a===b)return true;
+    const shorter=Math.min(a.length,b.length),longer=Math.max(a.length,b.length);
+    if(shorter>=8&&(a.includes(b)||b.includes(a))&&shorter/Math.max(1,longer)>=.64)contained=true;
+    best=Math.max(best,coverageTextSimilarity(a,b));
+  }
+  return contained||best>=.88;
+}
+
+function sameCoverageRole(left,right){const a=coverageRole(left),b=coverageRole(right);return!a||!b||a===b;}
+function coverageRole(node){const source=String(node?.source_type||'').toLowerCase();if(['patient','doctor'].includes(source))return source;const text=String(node?.text||'');if(/^(?:患者|患者原话)[：:]?/u.test(text))return'patient';if(/^(?:医生|医生原话)[：:]?/u.test(text))return'doctor';return'';}
+function coveragePolarity(node){const text=coverageFactTexts(node).join(' ');if(String(node?.polarity)==='negated'||/(?:没有|并无|尚无|未见|否认|不再|没再|无明显|无任何)/u.test(text))return'negated';if(String(node?.polarity)==='uncertain'||/(?:可能|也许|似乎|不确定)/u.test(text))return'uncertain';return'affirmed';}
+function coverageFactTexts(node){return[node?.text,node?.source_text].filter(Boolean).map(coverageComparableText).filter(Boolean);}
+function coverageComparableText(value){return normalizeMemoryText(String(value||'').replace(/^(?:患者|医生)(?:原话|陈述|报告|建议|解释|评估|认为)?[：:]?/u,'').replace(/^(?:我|本人|该患者)/u,''));}
+function coverageQuantitiesConflict(left,right){const a=coverageQuantitySignature(left),b=coverageQuantitySignature(right);return a.size>0&&b.size>0&&(a.size!==b.size||[...a].some(value=>!b.has(value)));}
+function coverageQuantitySignature(node){const values=new Set();for(const text of[node?.text,node?.source_text])for(const match of String(text||'').normalize('NFKC').matchAll(/[-+]?(?:\d+(?:\.\d+)?|\.\d+)(?:\s*[-–~至]\s*\d+(?:\.\d+)?)?\s*(?:%|mmol\/?l|mg\/?dl|mg|mcg|g|kg|ml|l|mmhg|bpm|iu|u|单位|毫克|微克|克|千克|毫升|升|次|分钟|小时|天)?/giu))values.add(match[0].replace(/\s+/gu,'').toLowerCase().replace(/[~至–]/gu,'-'));return values;}
+
+function stoppedMedicationEntity(text){
+  const match=/(?:把)?([^，。！？!?；;：:]{2,32}?)(?:停用|停药|停了|停止服用|不再服用)/u.exec(String(text||''));
+  return match?.[1]?.replace(/^(?:患者|患者原话|医生原话)[：:]?/u,'').trim()||null;
+}
+
+function roundRobinCoverage(groups,limit,perTurn){
+  const selected=[],seen=new Set();
+  for(let rank=0;rank<perTurn&&selected.length<limit;rank++)for(const group of groups){const item=group[rank];if(!item)continue;const key=normalizeMemoryText(item.text);if(!key||seen.has(key))continue;seen.add(key);selected.push(item);if(selected.length>=limit)break;}
+  const rest=groups.flat().sort((a,b)=>b.coverage_score-a.coverage_score||a.span[0]-b.span[0]);
+  for(const item of rest){const key=normalizeMemoryText(item.text);if(selected.length>=limit)break;if(!key||seen.has(key))continue;seen.add(key);selected.push(item);}
+  return selected;
+}
+
+function coverageLedgerScore(item){
+  const text=String(item?.text||'').trim(),meaningful=(text.match(/[\p{L}\p{N}]/gu)||[]).length;if(meaningful<6||meaningful>360)return 0;
+  const question=/[?？]\s*$/u.test(text),personalAppraisal=/(?:我|患者).*(?:担心|感觉|觉得|认为|希望|愿意|打算|决定|能不能|是不是|会不会)/u.test(text);
+  if(question&&!personalAppraisal)return 0;
+  if(item.source_type==='patient'){
+    let score=1;
+    if(/\d|%|mmol|mg|kg|毫克|单位|分钟|小时|凌晨|早上|晚上|昨天|今天|最近|近期|目前/iu.test(text))score+=3;
+    if(/(?:症状|感觉|出现|没有|没|不再|加重|减轻|改善|下降|升高|波动|疼|痛|晕|乏力|没劲|发软|口渴|醒|睡|吃|喝|运动|工作|加班|刷手机|用药|服药|停药|注射|监测|检查|结果)/u.test(text))score+=3;
+    if(/(?:担心|意识到|觉得|认为|希望|愿意|打算|决定|接受|拒绝|偏好|目标|承诺)/u.test(text))score+=2;
+    return score>=4?score:0;
+  }
+  let score=0;
+  if(/(?:医生|建议|需要|应当|可以|不要|避免|监测|复查|检查|治疗|用药|剂量|注射|就医|急诊|风险|诊断|评估|判断)/u.test(text))score+=3;
+  if(/(?:因为|所以|导致|引起|意味着|说明|机制|病理|神经|激素|受体|血管|肾脏|胰岛|药效|代谢|交感|副交感|HPA|皮质醇|RAAS|ROS)/iu.test(text))score+=3;
+  if(/\d|%|mmol|mg|kg|毫克|单位|分钟|小时|日期|近期|目前/u.test(text))score+=2;
+  return score>=5?score:0;
+}
+
+function coverageTextSimilarity(left,right){return genericTextSimilarity(String(left||'').replace(/^(?:患者|医生)(?:原话|陈述)?[：:]/u,''),String(right||'').replace(/^(?:患者|医生)(?:原话|陈述)?[：:]/u,''));}
+function recoverCompleteMemoryNodePrefix(raw){
+  const text=String(raw||''),match=/"memory_nodes"\s*:\s*\[/u.exec(text);if(!match)return{memory_nodes:[]};
+  const memoryNodes=[];let objectStart=-1,depth=0,inString=false,escaped=false;
   for(let index=match.index+match[0].length;index<text.length;index++){
     const character=text[index];
     if(escaped){escaped=false;continue;}
@@ -195,76 +423,12 @@ function recoverCompleteEvidencePrefix(raw){
     if(character==='"'){inString=!inString;continue;}
     if(inString)continue;
     if(character==='{'){if(depth===0)objectStart=index;depth++;continue;}
-    if(character==='}'&&depth>0){depth--;if(depth===0&&objectStart>=0){try{const item=JSON.parse(text.slice(objectStart,index+1));if(item&&typeof item==='object'&&!Array.isArray(item))evidence.push(item);}catch{}objectStart=-1;}continue;}
+    if(character==='}'&&depth>0){depth--;if(depth===0&&objectStart>=0){try{const item=JSON.parse(text.slice(objectStart,index+1));if(item&&typeof item==='object'&&!Array.isArray(item))memoryNodes.push(item);}catch{}objectStart=-1;}continue;}
     if(character===']'&&depth===0)break;
   }
-  return{evidence};
+  return{memory_nodes:memoryNodes};
 }
 function alignmentWarning(index,sourceText,failureReason,attempted){return{item_index:index,model_source_text:sourceText,failure_reason:failureReason,attempted_match_levels:attempted};}
-
-function normalizeRoutesOutput(value, evidence=[]) {
-  const familyMatrix=Array.isArray(value)&&value.every(Array.isArray)?value:Array.isArray(value?.families)&&value.families.every(Array.isArray)?value.families:null;
-  const legacy=value?.routes??value;
-  const routes=familyMatrix?familyMatrix.map(families=>({families})):Array.isArray(legacy)&&legacy.length===1&&Array.isArray(legacy[0]?.routes)&&legacy[0].routes.length>1?legacy[0].routes:Array.isArray(legacy)&&legacy.every(item=>item&&typeof item==='object'&&Array.isArray(item.routes)&&item.routes.length<=1)?legacy.map(item=>item.routes[0]||{families:[]}):legacy;
-  if(!Array.isArray(routes))return routes;
-  const normalized=[],warnings=[];
-  routes.forEach((rawRoute,index)=>{
-    const route=rawRoute&&typeof rawRoute==='object'?rawRoute:{},source=evidence[index];
-    const rawFamilies=Array.isArray(route.families)?route.families.map(f=>String(f||'').trim()):route.families;
-    const families=deduplicateRouteFamilies(rawFamilies,source,{routeIndex:index,routeId:String(index),warnings});
-    normalized.push({...source,id:String(index),families});
-  });
-  Object.defineProperty(normalized,'warnings',{value:warnings,enumerable:false});
-  return normalized;
-}
-
-function deduplicateRouteFamilies(families,evidence,{routeIndex,routeId,warnings}){
-  if(!Array.isArray(families)||families.length<2)return families;
-  // Never repair around an illegal taxonomy label. validateRoutes must still
-  // reject every invalid candidate, including one that would be dropped.
-  if(families.some(item=>routeFamilyValidationError(item,evidence)))return families;
-  const output=[],seen=new Map();
-  for(let index=0;index<families.length;index++){
-    const family=families[index];
-    if(!seen.has(family)){seen.set(family,index);output.push(family);continue;}
-    warnings.push({
-      warning_type:'exact_route_label_deduplicated',route_index:routeIndex,route_id:routeId,evidence_id:evidence?.evidence_id||null,
-      family,kept_label_index:seen.get(family),removed_label_index:index,selection_basis:'exact_family'
-    });
-  }
-  return output;
-}
-
-function attachRouterWarnings(result){if(result?.value?.warnings?.length&&result.trace)result.trace.validation_warnings=result.value.warnings;return result;}
-
-const ROUTER_BATCH_SIZE=8;
-
-async function routeWithFallback(gateway,input,evidence,observation){
-  try{
-    if(evidence.length<=ROUTER_BATCH_SIZE)return await gateway.completeJSON('router',input,value=>validateRoutes(normalizeRoutesOutput(value,evidence),evidence),()=>routeEvidence(evidence,observation));
-    const batches=[];
-    for(let offset=0;offset<evidence.length;offset+=ROUTER_BATCH_SIZE){
-      const batchEvidence=evidence.slice(offset,offset+ROUTER_BATCH_SIZE),batchInput=input.slice(offset,offset+ROUTER_BATCH_SIZE);
-      batches.push({offset,promise:gateway.completeJSON('router',batchInput,value=>validateRoutes(normalizeRoutesOutput(value,batchEvidence),batchEvidence),()=>routeEvidence(batchEvidence,observation))});
-    }
-    const completed=await Promise.all(batches.map(batch=>batch.promise)),routes=[],warnings=[];
-    completed.forEach((result,batchIndex)=>{
-      const offset=batches[batchIndex].offset;
-      warnings.push(...(result.value?.warnings||[]).map(warning=>({...warning,route_index:Number(warning.route_index)+offset,route_id:String(Number(warning.route_id)+offset)})));
-      result.value.forEach((route,index)=>routes.push({...route,id:String(offset+index)}));
-    });
-    Object.defineProperty(routes,'warnings',{value:warnings,enumerable:false});
-    validateRoutes(routes,evidence);
-    return{value:routes,trace:mergeRouterBatchTraces(completed.map(result=>result.trace),input,routes)};
-  }catch(error){
-    throw error;
-  }
-}
-
-function mergeRouterBatchTraces(traces,input,routes){
-  const first=traces[0]||{},sum=key=>traces.reduce((total,trace)=>total+Number(trace?.[key]||0),0);
-  return{...first,model_input:input,parsed_response:routes,latency_ms:Math.max(0,...traces.map(trace=>Number(trace?.latency_ms||0))),token_input:sum('token_input'),token_output:sum('token_output'),estimated_cost_usd:sum('estimated_cost_usd'),retries:sum('retries'),raw_model_response:JSON.stringify(traces.map(trace=>trace?.raw_model_response||'')),raw_model_attempts:traces.flatMap((trace,batch_index)=>(trace?.raw_model_attempts||[]).map(attempt=>({...attempt,batch_index}))),router_batch_size:ROUTER_BATCH_SIZE,router_batch_count:traces.length,router_batch_traces:traces};
-}
 
 function locateContiguousQuote(input,quote){
   const attempted=['exact'],direct=input.indexOf(quote),second=direct<0?-1:input.indexOf(quote,direct+1);if(direct>=0&&second<0)return{span:[direct,direct+quote.length],level:'exact',score:1,attempted_match_levels:attempted};
@@ -334,9 +498,9 @@ function protectedTokensMatch(quote,candidate){
 function dominantLanguage(value){const han=(String(value).match(/[\p{Script=Han}]/gu)||[]).length,latin=(String(value).match(/[A-Za-z]/g)||[]).length;return han>latin*.3?'zh':'en';}
 function languageMismatch(input,output){if(!String(output).trim())return false;const expected=dominantLanguage(input),actual=dominantLanguage(output);return expected!==actual&&((expected==='zh'&&(output.match(/[A-Za-z]/g)||[]).length>8)||(expected==='en'&&(output.match(/[\p{Script=Han}]/gu)||[]).length>2));}
 
-function compactStates(states=[]) {
-  return states.map((state,index)=>({
-    id:String(index),family:state.family,value:state.value,polarity:state.polarity,status:state.status
+function compactMemory(nodes=[]) {
+  return nodes.filter(isAnswerableMemoryNode).map((node,index)=>({
+    id:String(index),memory_id:node.memory_id,families:node.families,text:node.text,source_text:node.source_text||null,event_time:node.event_time||null,polarity:node.polarity,status:node.status
   }));
 }
 
@@ -345,123 +509,26 @@ function strings(value,fallback=[]){return Array.isArray(value)?value.filter(ite
 
 function normalizeGenerated(value,action){
   const output=modelOutput(value);
-  return {action_type:action.type,response:String(output.response||'').trim(),citations:action.required_evidence_ids};
+  return {action_type:action.type,response:String(output.response||'').trim(),citations:action.required_memory_ids};
 }
 
 function normalizeAudit(value,action,generated){
   const deterministic=audit(action,generated), output=modelOutput(value);
   const violations=[...new Set([...deterministic.violations,...strings(output.violations)])];
   const passed=deterministic.passed&&output.passed===true&&violations.length===0;
-  return {passed,violations,grounded_evidence_ids:generated.citations||[],blocked_response:passed?null:generated.response,
+  return {passed,violations,grounded_memory_ids:generated.citations||[],blocked_response:passed?null:generated.response,
     safe_response:passed?(typeof output.safe_response==='string'&&output.safe_response.trim()?output.safe_response:generated.response):deterministic.safe_response};
 }
 
 function rewriteAtomic(text){return String(text||'').normalize('NFKC').trim();}
 
-function validateRoutes(value,evidence=[]){
-  if(!Array.isArray(value))throw new Error('routes must be an array');
-  if(value.length!==evidence.length)throw new Error(`router must return exactly ${evidence.length} routes`);
-  const seen=new Set();
-  for(let index=0;index<value.length;index++){
-    const route=value[index],expectedId=String(index);
-    if(!route?.evidence_id||!Array.isArray(route.families))throw new Error('invalid route');
-    if(route.id!==expectedId||route.evidence_id!==evidence[index]?.evidence_id||seen.has(route.id))throw new Error('router ids must appear exactly once in input order');
-    seen.add(route.id);
-  }
-  // Validate every candidate label before checking duplicates, so
-  // deduplication can never conceal an illegal family.
-  for(let index=0;index<value.length;index++)for(const item of value[index].families){const validationError=routeFamilyValidationError(item,evidence[index]);if(validationError)throw new Error(validationError);}
-  for(const route of value){
-    const labelSeen=new Set();
-    for(const family of route.families){if(labelSeen.has(family))throw new Error(`duplicate route family ${family}`);labelSeen.add(family);}
-  }
-  return value;
-}
-
-function routeFamilyValidationError(family,evidence={}){
-  if(!STATE_FAMILIES.includes(family))return'invalid route family';
-  return null;
-}
-
-function routeEvidence(evidence){return evidence.map((item,index)=>({...item,id:String(index),families:Array.isArray(item.families)?item.families.filter(family=>STATE_FAMILIES.includes(family)):[]}));}
-
-function updatePatientGraph(routes,historicalNodes,historicalEdges,o){
-  const nodes=[],deltas=[];
-  for(const family of STATE_FAMILIES)for(const route of routes.filter(item=>item.families.includes(family))){
-    const sameFamily=[...historicalNodes,...nodes].filter(node=>node.family===family),closest=[...sameFamily].sort((a,b)=>genericTextSimilarity(route.text,b.value)-genericTextSimilarity(route.text,a.value))[0],factorKey=closest&&genericTextSimilarity(route.text,closest.value)>=.62?stateFactorKey(closest):memoryTopicKey(route.text),owned=sameFamily.filter(node=>stateFactorKey(node)===factorKey),ordered=[...owned].sort(compareGraphChronology),newOrder=graphEventOrder(route),prior=Number.isFinite(newOrder)?[...ordered].reverse().find(node=>graphEventOrder(node)<=newOrder):ordered.at(-1),successor=Number.isFinite(newOrder)?ordered.find(node=>graphEventOrder(node)>newOrder):null;let operation='ADD';
-    if(prior){
-      if(String(prior.polarity||'affirmed')!==String(route.polarity||'affirmed'))operation='CONFLICT';else operation=equivalentStateFact(prior,route)?'NOOP':'UPDATE';
-    }
-    const conflictTarget=operation==='CONFLICT'?(prior?.status==='conflict'?prior.conflicts_with||prior.state_id:prior?.state_id||null):null;
-    const state={state_id:randomUUID(),subject_id:o.subject_id,family,factor_key:factorKey,factor_domains:factorDomains(family),value:route.text,status:operation==='CONFLICT'?'conflict':'active',source_type:route.source_type,event_time:route.event_time,valid_from:route.event_time||null,episode_id:route.episode_id,source_session_id:route.source_session_id||route.episode_id,turn_id:route.turn_id,certainty:route.certainty,polarity:route.polarity,evidence_ids:[route.evidence_id],version:Math.max(0,...owned.map(item=>Number(item.version)||0))+1,version_chain:[...(prior?.version_chain||[]),...(prior?[prior.state_id]:[])],predecessor_state_id:prior?.state_id||null,successor_state_id:successor?.state_id||null,supersedes:null,conflicts_with:conflictTarget,resolves:null,operation};
-    nodes.push(state);deltas.push({operation,family,state_id:state.state_id,prior_state_id:prior?.state_id||null,evidence_id:route.evidence_id});
-  }
-  return{version:'patient-graph-updater.v1',nodes,edges:buildPersistentGraphEdges(nodes,historicalNodes,historicalEdges),deltas,typed_node_counts:familyCounts(nodes)};
-}
-
-function buildPersistentGraphEdges(nodes,historicalNodes,historicalEdges){
-  const edges=[],known=new Set(historicalEdges.map(edge=>graphEdgeKey(edge))),nodeById=new Map([...historicalNodes,...nodes].map(node=>[String(node.state_id),node]));
-  const add=({from,to,edge_family,relation_type,evidence_ids,status='verified',confidence=1,support_kind='structural',source})=>{
-    if(!from||!to||from===to||!nodeById.has(String(from))||!nodeById.has(String(to)))return;
-    const evidenceIds=[...new Set((evidence_ids||[]).filter(Boolean).map(String))];if(!evidenceIds.length)return;
-    const candidate={edge_id:randomUUID(),subject_id:nodeById.get(String(from)).subject_id,from_state_id:String(from),to_state_id:String(to),edge_family,relation_type,evidence_ids:evidenceIds,confidence:Math.max(0,Math.min(1,Number(confidence)||0)),support_kind,status,verified:status==='verified',persistent:true,causal_claim:false,source,created_episode_id:nodeById.get(String(to)).episode_id||null};
-    const key=graphEdgeKey(candidate);if(known.has(key))return;known.add(key);edges.push(candidate);
-  };
-  for(const node of nodes){
-    const priorId=node.operation==='CONFLICT'?node.conflicts_with:node.predecessor_state_id||node.supersedes||node.resolves||(node.version_chain||[]).at(-1),prior=nodeById.get(String(priorId||''));
-    if(prior){
-      const base={evidence_ids:[...(prior.evidence_ids||[]),...(node.evidence_ids||[])],edge_family:'temporal',confidence:1,support_kind:'structural',source:'version_transition'};
-      if(node.operation==='SUPERSEDE')add({...base,from:node.state_id,to:prior.state_id,relation_type:'supersedes'});
-      else if(node.operation==='CONFLICT')add({...base,from:node.state_id,to:prior.state_id,relation_type:'conflicts'});
-      else if(node.operation==='RESOLVE')add({...base,from:node.state_id,to:prior.state_id,relation_type:'resolves'});
-      else if(node.operation==='NOOP')add({...base,from:prior.state_id,to:node.state_id,relation_type:'persists'});
-      else add({...base,from:prior.state_id,to:node.state_id,relation_type:'updates'});
-    }
-    const successor=nodeById.get(String(node.successor_state_id||''));
-    if(successor&&node.status!=='conflict'&&successor.status!=='conflict')add({from:node.state_id,to:successor.state_id,edge_family:'temporal',relation_type:'updates',evidence_ids:[...(node.evidence_ids||[]),...(successor.evidence_ids||[])],confidence:1,support_kind:'structural',source:'backfill_successor_transition'});
-  }
-  const byEvidence=new Map();for(const node of nodes)for(const evidenceId of node.evidence_ids||[]){const group=byEvidence.get(String(evidenceId))||[];group.push(node);byEvidence.set(String(evidenceId),group);}
-  const order=new Map(STATE_FAMILIES.map((family,index)=>[family,index]));
-  for(const[evidenceId,group]of byEvidence){
-    const sorted=[...group].sort((a,b)=>order.get(a.family)-order.get(b.family));
-    for(let left=0;left<sorted.length;left++)for(let right=left+1;right<sorted.length;right++){
-      const from=sorted[left],to=sorted[right];
-      add({from:from.state_id,to:to.state_id,edge_family:'clinical_care',relation_type:'informs',evidence_ids:[evidenceId],confidence:.35,support_kind:'hypothesized',status:'candidate',source:'shared_atomic_evidence_candidate'});
-    }
-  }
-  return edges;
-}
-function graphEdgeKey(edge){return[edge.from_state_id,edge.to_state_id,edge.edge_family,edge.relation_type].map(String).join('\u0000');}
-function familyCounts(nodes){return Object.fromEntries(STATE_FAMILIES.map(family=>[family,nodes.filter(node=>node.family===family).length]));}
-function factorDomains(family){return[family.toLowerCase()];}
-function graphEventOrder(node){const parsed=Date.parse(node?.event_time||'');if(Number.isFinite(parsed))return parsed;const match=/(?:session|episode|admission|encounter)-(\d+)/i.exec(node?.episode_id||'');return match?Number(match[1]):NaN;}
-function compareGraphChronology(a,b){const left=graphEventOrder(a),right=graphEventOrder(b);if(Number.isFinite(left)&&Number.isFinite(right)&&left!==right)return left-right;if(Number.isFinite(left)!==Number.isFinite(right))return Number.isFinite(left)?1:-1;return(Number(a?.version)||0)-(Number(b?.version)||0);}
-function memoryTopicKey(text){const normalized=normalizeFactAssertion(text),grams=characterGrams(normalized,2);return grams.slice(0,12).join('')||normalized.slice(0,48)||'empty';}
-function stateFactorKey(state){return String(state?.factor_key||memoryTopicKey(state?.value||''));}
-function normalizeFactAssertion(text){
-  return String(text||'').normalize('NFKC').toLowerCase().replace(/[\s\p{P}\p{S}]/gu,'');
-}
-function quantitativeFactSignature(text){
-  return [...String(text||'').normalize('NFKC').toLowerCase().matchAll(/[-+]?(?:\d+(?:\.\d+)?|\.\d+)\s*(?:%|mg|mcg|g|kg|ml|l|mmol\/?l|mg\/?dl|mmhg|bpm|iu|u|单位|毫克|微克|克|千克|毫升|升)?/giu)]
-    .map(match=>match[0].replace(/\s+/gu,'')).join('|');
-}
-function equivalentStateFact(prior,next){
-  const left=String(prior?.value||''),right=String(next?.text||next?.value||'');
-  return String(prior?.polarity||'affirmed')===String(next?.polarity||'affirmed')
-    &&normalizeFactAssertion(left)===normalizeFactAssertion(right)
-    &&quantitativeFactSignature(left)===quantitativeFactSignature(right);
-}
-function characterGrams(value,size){const out=[];for(let index=0;index<=value.length-size;index++)out.push(value.slice(index,index+size));return[...new Set(out)];}
-function genericTextSimilarity(left,right){const a=new Set(characterGrams(normalizeFactAssertion(left),2)),b=new Set(characterGrams(normalizeFactAssertion(right),2));if(!a.size||!b.size)return 0;let hits=0;for(const gram of a)if(b.has(gram))hits++;return hits/Math.max(a.size,b.size);}
-function currentMemory(states){const latest=new Map();for(const state of states){const key=`${state.family}|${stateFactorKey(state)}`,prior=latest.get(key);if(!prior||compareGraphChronology(prior,state)<=0)latest.set(key,state);}return [...latest.values()];}
-
-function actionPolicy(observation,states){const conflict=states.some(item=>item.status==='conflict'),uncertain=states.some(item=>item.polarity==='uncertain'||Number(item.certainty)<.8),type=conflict?'VERIFY':uncertain?'ASK':'ANSWER',ids=[...new Set(states.flatMap(item=>item.evidence_ids||[]))],requirements=communicationActionRequirements(type,{rememberedRisk:false,currentRisk:false});return{type,explanation:requirements.explanation,required_evidence_ids:ids,required_content:requirements.required_content,forbidden_content:requirements.forbidden_content};}
+function actionPolicy(observation,memory){const conflict=memory.some(item=>item.status==='conflict'),uncertain=memory.some(item=>item.polarity==='uncertain'||Number(item.certainty)<.8)||/(?:不确定|不清楚|不知道|是否|要不要|能不能|可以吗|吗[？?]?\s*$)/u.test(observation.raw_text),type=conflict?'VERIFY':uncertain?'ASK':'ANSWER',ids=[...new Set(memory.map(item=>item.memory_id).filter(Boolean))],requirements=communicationActionRequirements(type,{rememberedRisk:false,currentRisk:false});return{type,explanation:requirements.explanation,required_memory_ids:ids,required_content:requirements.required_content,forbidden_content:requirements.forbidden_content};}
 function validateGenerated(x){if(!x||typeof x.response!=='string'||!x.response.trim())throw new Error('generated response required');if(!x.action_type)throw new Error('action_type required');return x;}
-function generateFromMemory(action,input){const response={ESCALATE:'你现在的安全最重要。请立即联系当地急救或危机支持，并尽快让一位可信任的人陪在你身边。你现在是否安全？是否有具体计划、可用手段或马上行动的可能？',VERIFY:'现有记忆中有冲突或时间不清。我们先核对具体来源和发生时间，再继续会更可靠。',ASK:'我想先确认一个关键信息：你说的不确定部分具体发生在什么时候，现在仍然如此吗？',ANSWER:input.memory.length?'我记得你之前提供的信息。结合你刚才说的内容，我们可以继续围绕当前变化和下一步安排来谈。':'我听到了你刚才说的内容。我们可以先从你现在最希望解决的部分开始。',REFUSE:'这个请求超出当前可安全处理的范围。'}[action.type]||'我听到了你刚才说的内容。';return{action_type:action.type,response,citations:action.required_evidence_ids};}
+function generateFromMemory(action,input){const response={ESCALATE:'你现在的安全最重要。请立即联系当地急救或危机支持，并尽快让一位可信任的人陪在你身边。你现在是否安全？是否有具体计划、可用手段或马上行动的可能？',VERIFY:'现有记忆中有冲突或时间不清。我们先核对具体来源和发生时间，再继续会更可靠。',ASK:'我想先确认一个关键信息：你说的不确定部分具体发生在什么时候，现在仍然如此吗？',ANSWER:input.memory.length?'我记得你之前提供的信息。结合你刚才说的内容，我们可以继续围绕当前变化和下一步安排来谈。':'我听到了你刚才说的内容。我们可以先从你现在最希望解决的部分开始。',REFUSE:'这个请求超出当前可安全处理的范围。'}[action.type]||'我听到了你刚才说的内容。';return{action_type:action.type,response,citations:action.required_memory_ids};}
 function validateAudit(x){if(typeof x?.passed!=='boolean'||!Array.isArray(x?.violations))throw new Error('invalid AuditResult');return x;}
-function audit(action,g){const v=[];if(g.action_type!==action.type)v.push('Generator changed the Action Policy decision.');for(const x of action.forbidden_content)if(x&&g.response.includes(x))v.push(`Response includes forbidden content: ${x}`);if(action.type==='ESCALATE'&&!/急救|危机|emergency|crisis/i.test(g.response))v.push('Action Policy requires escalation language.');return{passed:v.length===0,violations:v,grounded_evidence_ids:g.citations||[],blocked_response:v.length?g.response:null,safe_response:v.length?'系统已阻止不符合 Action Policy 的回复。':g.response};}
+function audit(action,g){const v=[];if(g.action_type!==action.type)v.push('Generator changed the Action Policy decision.');for(const x of action.forbidden_content)if(x&&g.response.includes(x))v.push(`Response includes forbidden content: ${x}`);if(action.type==='ESCALATE'&&!/急救|危机|emergency|crisis/i.test(g.response))v.push('Action Policy requires escalation language.');return{passed:v.length===0,violations:v,grounded_memory_ids:g.citations||[],blocked_response:v.length?g.response:null,safe_response:v.length?'系统已阻止不符合 Action Policy 的回复。':g.response};}
 function diff(a,b){const aa=JSON.stringify(a)??'null',bb=JSON.stringify(b)??'null';return {changed:aa!==bb,input_bytes:aa.length,output_bytes:bb.length,summary:aa===bb?'No structured change.':'Output produced or transformed fields; inspect raw JSON for exact values.'};}
-function readPatientGraphSnapshot(store,subjectId){for(let attempt=0;attempt<3;attempt++){const before=store.graphRevisionFor(subjectId),nodes=store.graphNodesFor(subjectId),edges=store.graphEdgesFor(subjectId),after=store.graphRevisionFor(subjectId);if(before===after)return{revision:after,nodes,edges};}throw new Error(`Patient Graph for ${subjectId} changed repeatedly while being read; retry the observation`);}
-function memoryCommitFailure(error){return{kind:/changed concurrently/i.test(String(error?.message||''))?'graph_revision_conflict':'memory_commit_error',message:String(error?.message||error),suggestion:/changed concurrently/i.test(String(error?.message||''))?'Retry this observation so graph versioning is recomputed from the latest patient revision.':'The Patient Graph transaction rolled back. Inspect node, edge, Evidence, and database constraints before retrying; no successful commit is claimed.'};}
+function readMemoryGraphSnapshot(store,subjectId){for(let attempt=0;attempt<3;attempt++){const before=store.memoryGraphRevisionFor(subjectId),nodes=store.memoryNodesFor(subjectId),edges=store.memoryEdgesFor(subjectId),after=store.memoryGraphRevisionFor(subjectId);if(before===after)return{revision:after,nodes,edges};}throw new Error(`Memory Graph for ${subjectId} changed repeatedly while being read; retry the observation`);}
+function memoryCommitFailure(error){return{kind:/changed concurrently/i.test(String(error?.message||''))?'graph_revision_conflict':'memory_commit_error',message:String(error?.message||error),suggestion:/changed concurrently/i.test(String(error?.message||''))?'Retry this observation so graph versioning is recomputed from the latest patient revision.':'The Memory Graph transaction rolled back. Inspect Memory Node, Memory Edge, provenance and database constraints before retrying; no successful commit is claimed.'};}
 
-export const pipelineInternals={extractEvidence,normalizeEvidenceOutput,normalizeRoutesOutput,validateRoutes,locateContiguousQuote,routeEvidence,routeWithFallback,updatePatientGraph,currentMemory,actionPolicy,generateFromMemory,audit};
+export const pipelineInternals={extractMemoryNodes,buildSemanticContextUnits,semanticExtractorInput,bindSemanticSupport,normalizeMemoryNodeOutput,normalizeMemoryTagsOutput,materializeEmptyMemoryTags,validateMemoryTags,locateContiguousQuote,tagMemoryNodes,tagMemoryWithFallback,updateMemoryGraph,currentMemory,actionPolicy,generateFromMemory,audit,augmentExtractorCoverage,coverageLedgerCandidates,quarantineUnalignedMemoryNodes,memoryTopicKey};

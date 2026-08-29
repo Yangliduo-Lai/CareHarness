@@ -16,13 +16,11 @@ export function cpcdAnswerInput(runtimeInput={},item={}){
   const taskType=String(item.task||''),dimensions=CPCD_DIMENSIONS[taskType];
   if(!dimensions)throw new Error(`Unsupported CPCD-Bench task: ${taskType}`);
   const metadata=item.metadata||{},memorySource=taskType==='session_level_response_generation'?null:{
-    states:runtimeInput.retrieved_states||[],
-    evidence:runtimeInput.retrieved_evidence||[],
-    evidence_chains:runtimeInput.retrieved_evidence_chains||[],
-    working_state:runtimeInput.working_state||null,
-    verified_relations:runtimeInput.query_time_relations||[],
-    evidence_proof:runtimeInput.evidence_proof||null,
-    action_policy:runtimeInput.harness_action_policy||null
+    memory_nodes:runtimeInput.memory_nodes||[],
+    memory_edges:runtimeInput.memory_edges||[],
+    working_memory:runtimeInput.working_memory||null,
+    investigation_policy:runtimeInput.investigation_policy||null,
+    investigation_trace:runtimeInput.investigation_trace||[]
   };
   // This allow-list is the answer-time visibility boundary. Evaluator-only
   // representative/reference/answer_source/evaluation/rubric/history fields are omitted.

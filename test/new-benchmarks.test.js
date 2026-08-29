@@ -28,9 +28,9 @@ test('CPCD post-answer Judge input follows task-specific reference and history d
 });
 
 test('CPCD Answer input exposes only the official SR input or CareHarness MR/TCR memory',()=>{
-  const runtime={retrieved_states:[{state_id:'s1'}],retrieved_evidence:[{evidence_id:'e1'}]},item={score_id:'m',task:'memory_recall',question:'Q',gold:['HIDDEN_REFERENCE'],metadata:{case_id:'c',task_file:'c.json',full_session_file:'c_fullsession.json',official_input:{consultation_history:'placeholder'},representative_point:'HIDDEN_POINT',answer_source:{secret:'HIDDEN_SOURCE'},evaluation_focus:{secret:'HIDDEN_EVALUATION'},official_rubric:'HIDDEN_RUBRIC',full_consultation_history:[{content:'HIDDEN_RAW_HISTORY'}]}};
+  const runtime={memory_nodes:[{memory_id:'m1',text:'可见记忆'}],memory_edges:[],working_memory:{memory_ids:['m1']}},item={score_id:'m',task:'memory_recall',question:'Q',gold:['HIDDEN_REFERENCE'],metadata:{case_id:'c',task_file:'c.json',full_session_file:'c_fullsession.json',official_input:{consultation_history:'placeholder'},representative_point:'HIDDEN_POINT',answer_source:{secret:'HIDDEN_SOURCE'},evaluation_focus:{secret:'HIDDEN_EVALUATION'},official_rubric:'HIDDEN_RUBRIC',full_consultation_history:[{content:'HIDDEN_RAW_HISTORY'}]}};
   const answerInput=cpcdAnswerInput(runtime,item),serialized=JSON.stringify(answerInput);
-  assert.equal(answerInput.prompt_protocol,'official-online-template-adapted-careharness-memory');assert.deepEqual(answerInput.memory_source.states,[{state_id:'s1'}]);
+  assert.equal(answerInput.prompt_protocol,'official-online-template-adapted-careharness-memory');assert.deepEqual(answerInput.memory_source.memory_nodes,runtime.memory_nodes);assert.deepEqual(answerInput.memory_source.working_memory,runtime.working_memory);
   for(const hidden of ['HIDDEN_REFERENCE','HIDDEN_POINT','HIDDEN_SOURCE','HIDDEN_EVALUATION','HIDDEN_RUBRIC','HIDDEN_RAW_HISTORY'])assert.equal(serialized.includes(hidden),false,hidden);
   assert.equal(cpcdAnswerMaxTokens(item),512);assert.equal(cpcdJudgeMaxTokens(item),1200);assert.equal(cpcdAnswerMaxTokens({...item,task:'temporal_causal_reasoning'}),3000);assert.equal(cpcdJudgeMaxTokens({...item,task:'temporal_causal_reasoning'}),2200);
 });

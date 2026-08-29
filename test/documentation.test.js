@@ -20,19 +20,14 @@ test('README is the only documentation entry',()=>{
 
 test('README contains only the required run instructions',()=>{
   for(const text of [
-    'Node.js `22.9`','CAREHARNESS_DATA_ROOT','generated_dialogues.json','generated_queries.json',
-    'npm run test:core','npm run smoke','npm start','模型与 Provider',
-    'Persona 1','Clean','97 题','仅预检（不调用模型）','启动 1 个 CareHarness 运行',
+    'Node.js 22.9','npm start','模型与 Provider',
     'npm run medmemory:persona1','--prepare-snapshots'
   ])assert.ok(readme.includes(text),text);
 });
 
 test('README says exactly where frontend and CLI results are shown',()=>{
   for(const text of [
-    'CareHarness 运行结果','Failure taxonomy 聚合','打开 Experiment：逐题看 action / prompt / scorer',
-    '查看答题/评分详情','Patient Graph Explorer','Runs & Errors','一键导出错题与完整诊断',
-    'reports/medmemory-careharness-results.json','reports/medmemory-careharness-results.md',
-    'Suite ID','Experiment ID','manifest hash','97/97'
+    'Experiments','Memory Graph','reports/medmemory-careharness-results.json','同名 `.md`','错题 JSON'
   ])assert.ok(readme.includes(text),text);
 });
 

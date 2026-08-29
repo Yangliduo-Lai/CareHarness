@@ -1,6 +1,7 @@
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { makeSessionObservation } from '../session-observation.js';
+import { assertNoHiddenBenchmarkInput } from '../information-boundary.js';
 
 export class BenchmarkAdapter {
   constructor(root) { this.root=root; }
@@ -9,6 +10,7 @@ export class BenchmarkAdapter {
   exists(path) { return existsSync(path); }
   list(path, filter=()=>true) { return existsSync(path)?readdirSync(path,{withFileTypes:true}).filter(filter):[]; }
   assertCoreObservation(o) {
+    assertNoHiddenBenchmarkInput(o,'core_observation');
     const forbidden=['query','question','gold','answer','answers','answer_options','judge_score','knowledge_points','summary','client_info_last'];
     const serialized=JSON.stringify(o||{}).toLowerCase();
     for(const key of forbidden) if(serialized.includes(`"${key}"`)) throw new Error(`Benchmark leakage: ${key} entered core observation`);

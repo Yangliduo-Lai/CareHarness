@@ -65,16 +65,17 @@ test('connection test performs authenticated model listing and real JSON inferen
   } finally { globalThis.fetch = originalFetch; store.close(); }
 });
 
-test('active model components contain no Gate assignments', () => {
+test('active model components expose the adaptive Investigation Policy without a Query Planner', () => {
   const store = new Store(':memory:');
   const registry = new ModelRegistry(store);
-  assert.deepEqual(registry.state().components, ['extractor', 'router', 'generator', 'auditor', 'query_planner', 'judge', 'scoring_judge', 'medlocomo_judge', 'cpcd_judge']);
+  assert.deepEqual(registry.state().components, ['extractor', 'router', 'relation_classifier', 'generator', 'auditor', 'investigation_policy', 'judge', 'scoring_judge', 'medlocomo_judge', 'cpcd_judge']);
   assert.equal(registry.state().components.includes('answer'),false);
-  assert.equal(registry.pipelineOptions().componentGateways.query_planner,undefined);
+  assert.equal(registry.state().components.includes('query_planner'),false);
+  assert.equal(registry.pipelineOptions().componentGateways.investigation_policy,undefined);
   assert.equal(registry.pipelineOptions().componentGateways.scoring_judge,undefined);
   assert.equal(registry.pipelineOptions().componentGateways.medlocomo_judge,undefined);
   assert.equal(registry.pipelineOptions().componentGateways.cpcd_judge,undefined);
   store.close();
 });
 
-test('model presets expose the official Beijing DashScope endpoint',()=>{const store=new Store(':memory:'),registry=new ModelRegistry(store),preset=registry.state().presets.dashscope;assert.equal(preset.base_url,'https://dashscope.aliyuncs.com/compatible-mode/v1');assert.equal(preset.model,'qwen3.5-flash');store.close()});
+test('model presets expose the official Beijing DashScope endpoint',()=>{const store=new Store(':memory:'),registry=new ModelRegistry(store),preset=registry.state().presets.dashscope;assert.equal(preset.base_url,'https://dashscope.aliyuncs.com/compatible-mode/v1');assert.equal(preset.model,'qwen3.7-flash');store.close()});

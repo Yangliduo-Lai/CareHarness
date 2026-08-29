@@ -1,0 +1,42 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync,mkdirSync,writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { assertCaseFreeStudentArtifact,buildCaseFreeStudentSummary,buildHoldoutTeacherFromFullTeacher,distillMedMemoryTeacher } from '../scripts/lib/medmemory-teacher.mjs';
+
+function fixture(){
+  const root=mkdtempSync(join(tmpdir(),'careharness-teacher-')),evalRoot=join(root,'persona_1','eval');mkdirSync(evalRoot,{recursive:true});
+  writeFileSync(join(evalRoot,'generated_dialogues.json'),JSON.stringify({sessions:[{session_id:1,event_info:{date:'2024-01-05'},messages:[{role:'user',content:'患者出现持续疲劳，睡眠后仍不能恢复。'},{role:'assistant',content:'建议结合治疗反应继续评估。'}]},{session_id:2,event_info:{date:'2024-01-12'},messages:[{role:'user',content:'规律治疗后症状仍在，需要纵向比较治疗反应。'},{role:'assistant',content:'应结合前后变化判断。'}]}]}));
+  writeFileSync(join(evalRoot,'generated_queries.json'),JSON.stringify({queries:[{query_id:'q1',session_id:2,query_type:'multi_hop_clinical_deduction',question:'为什么仍然疲劳？',answers:[{content:'需要结合持续疲劳与治疗反应判断。',is_correct:true,explanation:'覆盖患者事实与机制。'}],source_key_points:[{content:'持续疲劳且睡眠后不能恢复',session_id:1},{content:'建议结合治疗反应继续评估',session_id:0}],metadata:{required_memory_nodes:['规律治疗后症状仍在，需要纵向比较治疗反应。','ZZZ_ONLY_HIDDEN_9937'],reasoning_chain:[{node_id:1,session_id:1,content:'持续疲劳且睡眠后不能恢复',role:'起点'},{node_id:2,session_id:0,content:'某个只存在于评分标注中的机制桥',role:'中间节点'}]}}]}));
+  return root;
+}
+
+function fatigueFixture(){
+  const root=mkdtempSync(join(tmpdir(),'careharness-teacher-fatigue-')),evalRoot=join(root,'persona_1','eval');mkdirSync(evalRoot,{recursive:true});
+  writeFileSync(join(evalRoot,'generated_dialogues.json'),JSON.stringify({sessions:[{session_id:8,event_info:{date:'2024-01-20'},messages:[{role:'user',content:'像电池一直卡在20%，睡一觉也补不回来，持续被高血糖拖着走。'}]},{session_id:71,event_info:{date:'2024-08-01'},messages:[{role:'user',content:'最近几天持续性代谢性疲劳又重了一点，但睡眠之后稍有恢复。'}]}]}));
+  writeFileSync(join(evalRoot,'generated_queries.json'),JSON.stringify({queries:[{query_id:'fatigue_ig',session_id:100,query_type:'inference_generation',question:'最近更累，需要调整治疗吗？',answers:[{content:'先结合既往代谢性疲劳和治疗反应评估。',is_correct:true,explanation:'需使用患者特异信息。'}],source_key_points:[{content:'出现类似电池只有20%的持续性疲劳，睡眠无法恢复',session_id:8}],metadata:{trap_design:{trap_type:'disease_progression_misinterpretation',required_patient_info:['1月20日出现持续性、睡眠无法恢复的代谢性疲劳']},common_wrong_answer:{content:'直接调整治疗',why_wrong:'忽略病史'}}}]}));return root;
+}
+
+function lopoFixture(){
+  const root=mkdtempSync(join(tmpdir(),'careharness-teacher-lopo-'));
+  for(const personaId of[1,2]){
+    const evalRoot=join(root,`persona_${personaId}`,'eval'),fact=`患者${personaId}记录了可见症状${personaId}。`;mkdirSync(evalRoot,{recursive:true});
+    writeFileSync(join(evalRoot,'generated_dialogues.json'),JSON.stringify({sessions:[{session_id:1,event_info:{date:`2024-01-0${personaId}`},messages:[{role:'user',content:fact}]}]}));
+    writeFileSync(join(evalRoot,'generated_queries.json'),JSON.stringify({queries:[{query_id:`q${personaId}`,session_id:1,query_type:'entity_exact_match',question:`患者${personaId}记录了什么？`,answers:[{content:`可见症状${personaId}`,is_correct:true}],source_key_points:[{content:fact,session_id:1}]}]}));
+  }
+  return root;
+}
+
+test('oracle teacher emits auditable greedy retrieval batches without claiming a shortest path',()=>{const teacher=distillMedMemoryTeacher(fixture()),item=teacher.cases[0],direct=item.targets.find(target=>target.annotated_session_id===1),bridge=item.targets.find(target=>target.kind==='reasoning_node'&&target.annotated_session_id===0),sessionZeroSource=item.targets.find(target=>target.kind==='source_key_point'&&target.annotated_session_id===0),unreachable=item.targets.find(target=>target.reachability==='unreachable');assert.equal(teacher.runtime_eligible,false);assert.equal(item.oracle_summary.algorithm,'greedy_bounded_visible_source_batching.v1');assert.equal(item.oracle_summary.optimality_claim,'none');assert.ok(['direct_state_candidate','paraphrase_candidate','raw_dialogue_only'].includes(direct.reachability));assert.equal(bridge.reachability,'infer_missing_mechanism_bridge');assert.equal(bridge.search_eligible,false);assert.deepEqual(bridge.source_session_ids,[]);assert.notEqual(sessionZeroSource.reachability,'infer_missing_mechanism_bridge');assert.deepEqual(sessionZeroSource.source_session_ids,[1]);assert.ok(unreachable);
+  for(const step of item.oracle_trajectory)for(const key of['action','objective','source_session_ids','target_ids','expected_gain','stop_condition','instruction_source'])assert.ok(Object.hasOwn(step,key),`${step.action} lacks ${key}`);
+  const retrievalSteps=item.oracle_trajectory.filter(step=>/^(?:search|trace_longitudinal_evidence)/u.test(step.action)),retrieval=item.oracle_trajectory.find(step=>step.action==='search_multi_visit_evidence'),inference=item.oracle_trajectory.find(step=>step.action==='infer_missing_mechanism_bridge');assert.equal(retrievalSteps.length,1);assert.deepEqual(retrieval.source_session_ids,[1,2]);assert.ok(inference.target_ids.includes(bridge.target_id));assert.ok(inference.source_session_ids.every(id=>id>0));for(const step of retrievalSteps)assert.equal(step.target_ids.includes(bridge.target_id),false);assert.ok(item.oracle_trajectory.some(step=>step.action==='connect_multi_visit_evidence'));assert.ok(item.oracle_trajectory.some(step=>step.action==='assess_unreachable_evidence_gap'));assert.deepEqual(item.teacher_action_path,item.oracle_trajectory.map(step=>step.action));
+  const instructions=JSON.stringify(item.oracle_trajectory);for(const hidden of[bridge.text,...item.correct_answers])assert.equal(instructions.includes(hidden),false);
+  const merged=item.targets.find(target=>target.annotation_kinds.includes('source_key_point')&&target.annotation_kinds.includes('reasoning_node'));assert.ok(merged);assert.equal(item.targets.filter(target=>target.text===merged.text).length,1);
+});
+
+test('required patient info prefers same-query Source KP and explicit date over a later lexical distractor',()=>{const item=distillMedMemoryTeacher(fatigueFixture()).cases[0],required=item.targets.find(target=>target.kind==='required_patient_info');assert.equal(required.annotated_session_id,null);assert.deepEqual(required.source_session_ids,[8]);assert.match(required.reason,/same-query Source Key Point or explicit date/u);assert.notEqual(required.reachability,'infer_missing_mechanism_bridge');});
+
+test('student summary keeps only cross-case action, evidence-role and controlled decision-check patterns',()=>{const teacher=distillMedMemoryTeacher(fatigueFixture()),student=buildCaseFreeStudentSummary(teacher,{strategy_version:'strategy-v1',strategy_profile_hash:'a'.repeat(64)}),serialized=JSON.stringify(student),summary=student.query_types.inference_generation,scope=student.training_scope;assert.equal(student.runtime_eligible,true);assert.equal(student.source_teacher_version,teacher.version);assert.equal(student.compiled_strategy_profile_hash,'a'.repeat(64));assert.equal(scope.teacher_read_question_text,true);assert.equal(scope.teacher_read_gold_and_judge_metadata,true);assert.equal(scope.runtime_retains_question_text,false);assert.equal(scope.runtime_retains_case_ids,false);assert.equal(scope.runtime_retains_persona_ids,false);assert.equal(scope.runtime_retains_patient_facts,false);assert.equal(scope.runtime_retains_gold_or_judge_content,false);assert.ok(summary.recommended_action_paths.length);assert.ok(summary.recommended_evidence_role_patterns.length);assert.ok(summary.action_evidence_role_patterns.length);assert.deepEqual(summary.decision_check_priors,[{category:'disease_stage',support:1}]);for(const key of['persona_ids','holdout_persona_id','query_id','session_id','target_ids','source_session_ids','oracle_trajectory','trap_type'])assert.equal(serialized.includes(`"${key}"`),false);for(const value of['最近更累，需要调整治疗吗','持续疲劳且睡眠后仍不能恢复','先结合既往代谢性疲劳和治疗反应评估','disease_progression_misinterpretation'])assert.equal(serialized.includes(value),false);assert.doesNotThrow(()=>assertCaseFreeStudentArtifact(student,teacher));});
+
+test('optimized LOPO teacher filtering is identical to direct holdout distillation',()=>{const root=lopoFixture(),full=distillMedMemoryTeacher(root);for(const holdout of[1,2]){const optimized=buildHoldoutTeacherFromFullTeacher(full,holdout),direct=distillMedMemoryTeacher(root,{holdout_persona:holdout});assert.deepEqual(optimized,direct);assert.equal(optimized.artifact_hash,direct.artifact_hash);}});

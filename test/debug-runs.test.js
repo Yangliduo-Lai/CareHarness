@@ -18,11 +18,12 @@ test('breakpoint debug advances exactly one step and then continues without repl
   assert.deepEqual(second.traces.map(x=>x.ordinal),[0,1]);
   const done=await debug.advance(first.id,'continue');
   assert.equal(done.status,'completed');
-  assert.equal(done.traces.length,9);
-  assert.equal(new Set(done.traces.map(x=>x.ordinal)).size,9);
+  assert.equal(done.traces.length,10);
+  assert.equal(new Set(done.traces.map(x=>x.ordinal)).size,10);
+  assert.ok(done.traces.some(x=>x.component==='memory_relation_classifier'));
   assert.equal(done.traces.some(x=>x.component.startsWith('gate_')),false);
   assert.ok(done.traces.some(x=>x.component==='action_policy'));
-  assert.equal(store.statesFor('debug-patient').length>0,true);
+  assert.equal(store.memoryNodesFor('debug-patient').length>0,true);
   store.close();
 });
 
@@ -33,12 +34,12 @@ test('phase 2 breakpoint commits Patient before policy and then pauses before Do
   assert.equal(view.debug.current_stage,'patient');
   assert.equal(view.debug.patient_memory_written,false);
 
-  for(let i=0;i<4;i++)view=await debug.advance(sessionId,'step');
+  for(let i=0;i<5;i++)view=await debug.advance(sessionId,'step');
   assert.equal(view.status,'paused');
   assert.equal(view.traces.at(-1).component,'patient_memory_commit');
   assert.equal(view.debug.patient_memory_written,true);
   assert.equal(view.debug.doctor_memory_written,false);
-  assert.ok(store.statesFor('conversation-debug').length>0);
+  assert.ok(store.memoryNodesFor('conversation-debug').length>0);
   assert.equal(view.traces.some(x=>x.component==='action_policy'),false);
 
   for(let i=0;i<4;i++)view=await debug.advance(sessionId,'step');
@@ -72,10 +73,11 @@ test('breakpoint debug persists a failed model step with input, raw output, pars
   const failed=await debug.advance(first.id,'continue');
   assert.equal(failed.status,'failed');
   const trace=failed.traces.at(-1);
-  assert.equal(trace.component,'atomic_evidence_extractor');
+  assert.equal(trace.component,'memory_node_extractor');
   assert.equal(trace.status,'failed');
-  assert.equal(trace.input,observation.raw_text);
-  assert.equal(trace.gateway.model_input,observation.raw_text);
+  assert.equal(trace.input.session_text,observation.raw_text);
+  assert.equal(trace.gateway.model_input.session_text,observation.raw_text);
+  assert.ok(trace.input.context_units.every(unit=>typeof unit.unit_id==='string'&&unit.text));
   assert.equal(trace.output,null);
   assert.ok(trace.gateway.raw_model_attempts.length>=1);
   assert.match(trace.error.suggestion,/raw model response/i);
@@ -106,15 +108,15 @@ test('phase 1 breakpoint groups turns and pauses only between complete Sessions'
   assert.match(view.debug.current_observation.raw_text,/\[Role=Patient\]/);
   assert.match(view.debug.current_observation.raw_text,/\[Role=Doctor\]/);
 
-  for(let i=0;i<4;i++)view=await debug.advance(sessionId,'step');
+  for(let i=0;i<5;i++)view=await debug.advance(sessionId,'step');
   assert.equal(view.status,'paused');
   assert.equal(view.debug.boundary,true);
   assert.equal(view.debug.current_index,1);
   assert.equal(view.debug.completed_observations,1);
-  assert.equal(view.traces.length,5);
+  assert.equal(view.traces.length,6);
   assert.equal(view.traces.at(-1).component,'memory_commit');
   assert.equal(view.debug.runs.length,1);
-  assert.equal(store.statesFor('memory-debug').length>0,true);
+  assert.equal(store.memoryNodesFor('memory-debug').length>0,true);
 
   view=await debug.advance(sessionId,'step');
   assert.equal(view.status,'paused');
@@ -130,7 +132,7 @@ test('phase 1 breakpoint groups turns and pauses only between complete Sessions'
   assert.equal(view.status,'completed');
   assert.equal(view.debug.completed_observations,2);
   assert.equal(view.debug.run_ids.length,2);
-  assert.equal(view.traces.length,5);
+  assert.equal(view.traces.length,6);
   assert.equal(view.traces.some(x=>x.component==='action_policy'),false);
   assert.equal(view.traces.some(x=>x.component.startsWith('gate_')),false);
   store.close();

@@ -71,7 +71,7 @@ export class ModelGateway {
       else for(let attempt=0;attempt<=this.config.retries;attempt++){
         retries=attempt;
         try{
-          const previous=attempts.at(-1),repairInstruction=attempt?promptTextRetryInstruction(previous):null,messages=officialMessages?(repairInstruction?[...officialMessages,{role:'user',content:repairInstruction}]:officialMessages):null,repair=repairInstruction?`${prompt}\n\n${repairInstruction}`:prompt;
+          const previous=attempts.at(-1),repairInstruction=attempt?promptTextRetryInstruction(component,input,previous):null,messages=officialMessages?(repairInstruction?[...officialMessages,{role:'user',content:repairInstruction}]:officialMessages):null,repair=repairInstruction?`${prompt}\n\n${repairInstruction}`:prompt;
           requestedMaxTokens=this.#outputBudget(component,input,attempt,options.maxTokens);const completion=await this.#openAI(repair,requestedMaxTokens,messages,null);raw=completion.content;finishReason=completion.finish_reason;if(finishReason==='length')throw new Error(`Model output was truncated at max_tokens=${requestedMaxTokens}`);value=String(raw||'').trim();if(!value)throw new Error('Model provided no response');attempts.push({attempt,raw,parsed:value,finish_reason:finishReason,max_tokens:requestedMaxTokens,usage:completion.usage});break;
         }catch(e){attempts.push({attempt,raw,error:String(e.message||e),finish_reason:finishReason,max_tokens:requestedMaxTokens});if(attempt===this.config.retries)throw e;await backoff(attempt,e);}
       }
@@ -80,9 +80,12 @@ export class ModelGateway {
   }
 
   async #openAI(prompt,maxTokens=this.config.max_tokens,messages=null,responseFormat={type:'json_object'}) {
+    const tokenBudget = tokenBudgetParameter(this.config) === 'max_completion_tokens'
+      ? { max_completion_tokens: maxTokens }
+      : { max_tokens: maxTokens };
     const response = await fetch(`${this.config.base_url.replace(/\/$/, '')}/chat/completions`, {
       method: 'POST', headers: this.#headers(), signal: AbortSignal.timeout(this.config.timeout_ms),
-      body: JSON.stringify({ model: this.config.model, temperature: this.config.temperature, max_tokens:maxTokens,...(this.config.provider==='dashscope'?{enable_thinking:false}:{}),
+      body: JSON.stringify({ model: this.config.model, temperature: this.config.temperature, ...tokenBudget,...(Number.isInteger(this.config.seed)?{seed:this.config.seed}:{}),...(this.config.provider==='dashscope'?{enable_thinking:false}:{}),
         ...(responseFormat?{response_format:responseFormat}:{}),messages:messages||[{role:'user',content:prompt}] })
     });
     const raw = await response.text();
@@ -91,7 +94,7 @@ export class ModelGateway {
     return{content:body.choices?.[0]?.message?.content??'',finish_reason:body.choices?.[0]?.finish_reason??null,usage:body.usage??null};
   }
 
-  #outputBudget(component,input,attempt,override){if(Number.isInteger(override)&&override>0)return override;const base=Number(this.config.max_tokens)||1200,chars=typeof input==='string'?input.length:JSON.stringify(input||{}).length,estimated=component==='extractor'?Math.ceil(chars*2.5):component==='router'?Math.ceil(chars*.7):base,initial=Math.min(8192,Math.max(base,estimated));return attempt?Math.min(8192,initial*2):initial;}
+  #outputBudget(component,input,attempt,override){const configured=Number(this.config.max_tokens)||1200,ceiling=Math.max(8192,configured);if(Number.isInteger(override)&&override>0)return Math.min(ceiling,override*(2**attempt));const chars=typeof input==='string'?input.length:JSON.stringify(input||{}).length,estimated=component==='extractor'?Math.ceil(chars*2.5):component==='router'?Math.ceil(chars*.7):configured,initial=Math.min(ceiling,Math.max(configured,estimated));return attempt?Math.min(ceiling,initial*(2**attempt)):initial;}
 
   #headers() {
     const key = this.apiKey || (this.config.api_key_ref ? process.env[this.config.api_key_ref] : '');
@@ -104,12 +107,17 @@ export class ModelGateway {
   #trace(component, input, prompt, raw, parsed, start, retries, error, attempts=[],finishReason=null,requestedMaxTokens=this.config.max_tokens,options={}) {
     const tokensIn = Math.ceil(prompt.length / 4), tokensOut = Math.ceil(String(raw).length / 4);
     return sanitizeSecrets({ component, prompt_version: PROMPTS[component]?.version || 'none', provider: this.config.provider,
-      model: this.config.model, config: this.publicConfig(), latency_ms: +(performance.now() - start).toFixed(2),finish_reason:finishReason,requested_max_tokens:requestedMaxTokens,
+      model: this.config.model, config: this.publicConfig(), latency_ms: +(performance.now() - start).toFixed(2),finish_reason:finishReason,requested_max_tokens:requestedMaxTokens,token_budget_parameter:tokenBudgetParameter(this.config),
       token_input: tokensIn, token_output: tokensOut, estimated_cost_usd: 0, retries, raw_model_response: raw,
       model_input:input, prompt, parsed_response: parsed ?? null, raw_model_attempts:attempts, response_format:options.structuredOutput?.response_format,
       output_json_schema:options.structuredOutput?.json_schema||options.structuredOutput?.response_format?.json_schema||null,
       schema_enforcement:options.structuredOutput?.enforcement||'json_object',error, mock: this.config.provider === 'mock' });
   }
+}
+
+function tokenBudgetParameter(config){
+  const model=String(config?.model||'').toLowerCase().split('/').at(-1);
+  return /^(?:gpt-5(?:[.-]|$)|o[1-9](?:[.-]|$))/.test(model)?'max_completion_tokens':'max_tokens';
 }
 
 function stripFence(text) { return text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, ''); }
@@ -128,7 +136,7 @@ function structuredOutputContract(component,input,config){
 function componentJsonSchema(component,input){
   if(component!=='router')return null;
   const count=Array.isArray(input)?input.length:0;
-  return{name:'state_family_assignments',strict:true,schema:{type:'object',additionalProperties:false,properties:{families:{type:'array',minItems:count,maxItems:count,items:{type:'array',uniqueItems:true,items:{type:'string',enum:ROUTER_FAMILIES}}}},required:['families']}};
+  return{name:'memory_family_assignments',strict:true,schema:{type:'object',additionalProperties:false,properties:{families:{type:'array',minItems:count,maxItems:count,items:{type:'array',uniqueItems:true,items:{type:'string',enum:ROUTER_FAMILIES}}}},required:['families']}};
 }
 function supportsNativeJsonSchema(config){
   if(config?.capabilities?.includes('json_schema'))return true;

@@ -10,7 +10,7 @@ export class CareLifecycle {
     const cleared=options.reset_memory?this.store.clearMemory(observations[0]?.subject_id):0;
     const pipeline=new Pipeline(this.store,this.modelRegistry.pipelineOptions()),runs=[],sessions=groupSessionObservations(observations);
     for(const observation of sessions)runs.push(await pipeline.run(observation,{...options,phase:'memory_build'}));
-    const patient_graph=this.store.patientGraphFor(runs[0].subject_id);return {phase:'memory_build',subject_id:runs[0].subject_id,cleared,processed:runs.length,source_observations:observations.length,runs,patient_graph,memory:patient_graph.nodes};
+    const memory_graph=this.store.memoryGraphFor(runs[0].subject_id);return {phase:'memory_build',subject_id:runs[0].subject_id,cleared,processed:runs.length,source_observations:observations.length,runs,memory_graph,memory:memory_graph.nodes};
   }
 
   async converse(rawObservation,options={}){
@@ -30,6 +30,6 @@ export class CareLifecycle {
     }
     const writes=[{sequence:1,role:'patient',source_type:'patient',run_id:conversation.id,committed:conversation.final.patient_memory_committed===true},
       {sequence:2,role:'doctor',source_type:'doctor',run_id:feedback?.id||null,committed:Boolean(feedback)}];
-    const patient_graph=this.store.patientGraphFor(observation.subject_id);return {phase:'conversation',conversation,feedback,writes,patient_memory_written:writes[0].committed,doctor_memory_written:writes[1].committed,memory_ready_for_next_turn:writes.every(x=>x.committed),patient_graph,memory:patient_graph.nodes};
+    const memory_graph=this.store.memoryGraphFor(observation.subject_id);return {phase:'conversation',conversation,feedback,writes,patient_memory_written:writes[0].committed,doctor_memory_written:writes[1].committed,memory_ready_for_next_turn:writes.every(x=>x.committed),memory_graph,memory:memory_graph.nodes};
   }
 }
