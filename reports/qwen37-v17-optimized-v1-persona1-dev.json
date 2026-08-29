@@ -1,0 +1,632 @@
+{
+  "report_version": "medmemory-careharness-results.v2",
+  "generated_at": "2026-08-29T07:11:17.178Z",
+  "preflight": {
+    "passed": true,
+    "memory_pipeline_version": "unified-memory-graph-v17-semantic-source-anchors",
+    "evaluation_mode": "static_careharness",
+    "query_types": [],
+    "query_selection_policy": "adapter_complete_scope",
+    "scopes": [
+      {
+        "split": "dev",
+        "persona_id": 1,
+        "noise": false,
+        "query_count": 97,
+        "available_query_count": 97,
+        "query_selection_policy": "adapter_complete_scope",
+        "query_types": [],
+        "memory_scope": {
+          "subject_id": "medmemory-persona-1-clean",
+          "logical_subject_id": "medmemory-persona-1",
+          "memory_namespace": "clean",
+          "benchmark": "medmemorybench",
+          "persona_id": 1,
+          "noise": false,
+          "memory_pipeline_version": "unified-memory-graph-v17-semantic-source-anchors",
+          "memory_scope_key": "bbd056054916c30e0a5798b4a0c714aa16c623c7e916ab42541e0d1ae0183640",
+          "source_start_session": 1,
+          "source_end_session": 100,
+          "complete_through_session": 100,
+          "current_session": null,
+          "status": "completed",
+          "experiment_id": "3ec421dd-5219-4346-89f0-7f951f721e7a",
+          "target_start_session": 1,
+          "target_end_session": 100,
+          "observation_total": 100,
+          "observation_succeeded": 100,
+          "observation_failed": 0,
+          "updated_at": "2026-08-29T04:41:54.346Z"
+        }
+      }
+    ],
+    "credentials": {
+      "judge": {
+        "profile_id": "dashscope-qwen3.7-flash",
+        "provider": "dashscope",
+        "model": "qwen3.7-flash",
+        "credential": "session-memory"
+      },
+      "scoring_judge": {
+        "profile_id": "dashscope-qwen3.7-flash",
+        "provider": "dashscope",
+        "model": "qwen3.7-flash",
+        "credential": "session-memory"
+      },
+      "investigation_policy": {
+        "profile_id": "dashscope-qwen3.7-flash",
+        "provider": "dashscope",
+        "model": "qwen3.7-flash",
+        "credential": "session-memory"
+      }
+    },
+    "seed": 42,
+    "candidate_budget": 24,
+    "investigation_budget": 8,
+    "query_concurrency": 16,
+    "prepared_snapshots": [],
+    "heldout_details_sealed": false
+  },
+  "careharness_rows": [
+    {
+      "manifest_hash": "429b7a2b2796f2de6b7114cb0d00f4bf642ba8da75999215fe64c5a3458a9073",
+      "runtime": "static_careharness",
+      "split": "dev",
+      "noise": false,
+      "query_count": 97,
+      "query_selection_policy": "adapter_complete_scope",
+      "query_types": [],
+      "strict_full_suite": true,
+      "score": 0.6265721649484535,
+      "by_task": {
+        "entity_exact_match": 0.7,
+        "temporal_localization": 0.8,
+        "state_update": 0.6,
+        "inference_generation": 0.6,
+        "multiple_choice": 0.5789473684210527,
+        "multi_hop_clinical_deduction": 0.2221875
+      },
+      "mock": false,
+      "reproducible": true
+    }
+  ],
+  "failure_taxonomy": [
+    {
+      "experiment_id": "7c05b280-b936-439e-a88e-9c900eeead1d",
+      "split": "dev",
+      "persona_id": 1,
+      "noise": false,
+      "report": {
+        "version": "careharness-unified-memory-failure-taxonomy.v2",
+        "total": 37,
+        "failure_count": 37,
+        "counts": {
+          "H1": 0,
+          "H2": 0,
+          "H3": 5,
+          "H4": 1,
+          "H5": 11,
+          "H6": 4,
+          "H7": 1,
+          "M1": 0,
+          "M2": 2,
+          "M3": 9,
+          "M4": 3,
+          "M5": 1,
+          "X1": 0,
+          "X2": 0,
+          "X3": 0
+        },
+        "axis": {
+          "harness": 22,
+          "model_foundation": 15,
+          "external": 0
+        },
+        "high_frequency_harness_failure": "H5",
+        "post_answer_only": true,
+        "runtime_gold_or_judge_metadata_used": false
+      }
+    }
+  ],
+  "experiments": [
+    {
+      "id": "7c05b280-b936-439e-a88e-9c900eeead1d",
+      "status": "completed",
+      "manifest": {
+        "version": "medmemory-matched-experiment.v31-relevance-before-earliest",
+        "benchmark": "medmemorybench",
+        "evaluation_mode": "static_careharness",
+        "split": "dev",
+        "persona_id": 1,
+        "noise": false,
+        "query_count": 97,
+        "expected_query_count": 97,
+        "adapter_query_count": 97,
+        "query_selection_policy": "adapter_complete_scope",
+        "query_types": [],
+        "strict_full_suite": true,
+        "query_ids": [
+          "session_100_eem_1",
+          "session_100_eem_2",
+          "session_100_ig_1",
+          "session_100_ig_2",
+          "session_100_mcd_1",
+          "session_100_mq_2",
+          "session_100_sua_1",
+          "session_100_tla_1",
+          "session_100_tla_2",
+          "session_10_eem_1",
+          "session_10_eem_2",
+          "session_10_ig_1",
+          "session_10_ig_2",
+          "session_10_mq_1",
+          "session_10_mq_2",
+          "session_10_sua_1",
+          "session_10_tla_1",
+          "session_10_tla_2",
+          "session_20_eem_1",
+          "session_20_eem_2",
+          "session_20_ig_1",
+          "session_20_ig_2",
+          "session_20_mcd_1",
+          "session_20_mcd_2",
+          "session_20_mq_1",
+          "session_20_mq_2",
+          "session_20_sua_1",
+          "session_20_tla_1",
+          "session_20_tla_2",
+          "session_30_eem_1",
+          "session_30_eem_2",
+          "session_30_ig_1",
+          "session_30_ig_2",
+          "session_30_mq_1",
+          "session_30_mq_2",
+          "session_30_sua_1",
+          "session_30_tla_1",
+          "session_30_tla_2",
+          "session_40_eem_1",
+          "session_40_eem_2",
+          "session_40_ig_1",
+          "session_40_ig_2",
+          "session_40_mcd_1",
+          "session_40_mcd_2",
+          "session_40_mq_1",
+          "session_40_mq_2",
+          "session_40_sua_1",
+          "session_40_tla_1",
+          "session_40_tla_2",
+          "session_50_eem_1",
+          "session_50_eem_2",
+          "session_50_ig_1",
+          "session_50_ig_2",
+          "session_50_mq_1",
+          "session_50_mq_2",
+          "session_50_sua_1",
+          "session_50_tla_1",
+          "session_50_tla_2",
+          "session_60_eem_1",
+          "session_60_eem_2",
+          "session_60_ig_1",
+          "session_60_ig_2",
+          "session_60_mcd_1",
+          "session_60_mcd_2",
+          "session_60_mq_1",
+          "session_60_mq_2",
+          "session_60_sua_1",
+          "session_60_tla_1",
+          "session_60_tla_2",
+          "session_70_eem_1",
+          "session_70_eem_2",
+          "session_70_ig_1",
+          "session_70_ig_2",
+          "session_70_mq_1",
+          "session_70_mq_2",
+          "session_70_sua_1",
+          "session_70_tla_1",
+          "session_70_tla_2",
+          "session_80_eem_1",
+          "session_80_eem_2",
+          "session_80_ig_1",
+          "session_80_ig_2",
+          "session_80_mcd_2",
+          "session_80_mq_1",
+          "session_80_mq_2",
+          "session_80_sua_1",
+          "session_80_tla_1",
+          "session_80_tla_2",
+          "session_90_eem_1",
+          "session_90_eem_2",
+          "session_90_ig_1",
+          "session_90_ig_2",
+          "session_90_mq_1",
+          "session_90_mq_2",
+          "session_90_sua_1",
+          "session_90_tla_1",
+          "session_90_tla_2"
+        ],
+        "memory_snapshot": {
+          "pipeline_version": "unified-memory-graph-v17-semantic-source-anchors",
+          "fingerprint": "30fecb9a916c91f18dbb38f767350b2a78a9d7d676c4f48640235340c3d2eecb",
+          "memory_node_count": 3513,
+          "edge_count": 518,
+          "complete_through_session": 100
+        },
+        "models": {
+          "answer": {
+            "provider": "dashscope",
+            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "model": "qwen3.7-flash",
+            "temperature": 0,
+            "max_tokens": 1200,
+            "context_length": null
+          },
+          "relation_evaluator": {
+            "provider": "dashscope",
+            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "model": "qwen3.7-flash",
+            "temperature": 0,
+            "max_tokens": 1200,
+            "context_length": null
+          },
+          "scoring_judge": {
+            "provider": "dashscope",
+            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "model": "qwen3.7-flash",
+            "temperature": 0,
+            "max_tokens": 1200,
+            "context_length": null
+          },
+          "investigation_policy": {
+            "provider": "dashscope",
+            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "model": "qwen3.7-flash",
+            "temperature": 0,
+            "max_tokens": 1200,
+            "context_length": null
+          },
+          "embedding": {
+            "provider": "local",
+            "model": "Xenova/bge-small-zh-v1.5",
+            "base_model": "BAAI/bge-small-zh-v1.5",
+            "pooling": "cls",
+            "normalized": true
+          }
+        },
+        "seed": 42,
+        "temperatures": {
+          "answer": 0,
+          "relation_evaluator": 0,
+          "scoring_judge": 0,
+          "investigation_policy": 0
+        },
+        "prompt_versions": {
+          "memory_extractor": "extractor.session-memory.v13-source-anchored-semantic-state",
+          "memory_relation_classifier": "memory-relation-classifier.v1-source-grounded-noncausal",
+          "investigation_policy": "careharness-investigation-policy.closed-loop.v30-quality-weighted-learning",
+          "relation_evaluator": "careharness-unified-memory-assessor.v19-source-separated-relations",
+          "answer": "medmemorybench-answer.appendix-v1-careharness-overlay-v24-single-entity-current-value",
+          "scoring_judge": "medmemorybench-official-judge.appendix-v1-zh-rationale-v2",
+          "investigation_strategy": "medmemory-investigation-strategy.v2-auditable-offline-student"
+        },
+        "policy_artifacts": {
+          "offline_student": {
+            "status": "loaded_builtin",
+            "runtime_version": "medmemory-student-policy.runtime.v1-case-free-aggregate",
+            "strategy_profiles": {
+              "version": "medmemory-investigation-strategy.v2-auditable-offline-student",
+              "content_hash": "e8e577caf7cb63a37da667971c0883ad2e3862301e230f868bcfdb88dd8882aa",
+              "query_type_count": 6
+            },
+            "student_artifact": {
+              "version": "medmemory-student-strategy-summary.v2-action-role-patterns",
+              "artifact_hash": "d5e94fd9614cf411a0f152b15046ea241bcd9d526cf822972081c3653dec62e5"
+            },
+            "source_teacher_artifact": {
+              "version": "medmemory-oracle-teacher.v2-auditable-trajectories",
+              "artifact_hash": "e455b7213ae1b793a036e971bb42855e5a7e0c1bc0240a7a8ec3f86a94fe6a23"
+            },
+            "compiled_strategy": {
+              "version": "medmemory-investigation-strategy.v2-auditable-offline-student",
+              "profile_hash": "e8e577caf7cb63a37da667971c0883ad2e3862301e230f868bcfdb88dd8882aa"
+            },
+            "training_scope": {
+              "clean_only": true,
+              "persona_count": 20,
+              "holdout_persona_count": 0,
+              "case_count": 1939
+            },
+            "runtime_overlap": {
+              "public_query_type": true,
+              "aggregate_action_frequencies": true,
+              "aggregate_evidence_role_frequencies": true,
+              "aggregate_decision_check_frequencies": true,
+              "question_text": false,
+              "case_ids": false,
+              "persona_ids": false,
+              "patient_facts": false,
+              "gold_answers": false,
+              "judge_metadata": false,
+              "source_sessions": false,
+              "oracle_trajectories": false
+            },
+            "components": {
+              "matched_runtime_version": "careharness-investigation-runtime.v14-relevance-before-earliest",
+              "worker_set_version": "careharness-investigation-workers.v5-source-separated-relations"
+            }
+          }
+        },
+        "budgets": {
+          "candidate_budget": 24,
+          "investigation_budget": 8,
+          "investigation_policy_call_budget": 9,
+          "relation_evaluator_call_budget": 2,
+          "relation_edge_budget": 10,
+          "semantics": {
+            "candidates": "maximum unified Memory Nodes in current information",
+            "actions": "policy selects one registered worker after each observed result; non-terminal workers consume budget",
+            "investigation_policy": "one bounded transparent type-adaptive policy call per decision; no case answer or Judge metadata",
+            "relation_evaluator": "called only when the policy selects the semantic evaluation worker"
+          }
+        },
+        "scheduling": {
+          "query_concurrency": 16,
+          "independent_queries_parallel": true,
+          "per_query_dependency_order": [
+            "investigation",
+            "answer",
+            "judge"
+          ],
+          "result_order": "adapter_query_order"
+        },
+        "information_policy": {
+          "runtime_gold_or_judge_metadata_allowed": false,
+          "post_answer_offline_diagnosis_allowed": true,
+          "public_query_type_strategy_profiles": true,
+          "strategy_profiles_contain_case_content": false,
+          "oracle_teacher_runtime_separated": true,
+          "offline_strategy_teacher": {
+            "source": "MedMemoryBench Clean offline oracle teacher",
+            "persona_count": 20,
+            "total_question_count": 1986,
+            "eligible_question_count": 1939,
+            "teacher_read_question_gold_and_judge_metadata": true,
+            "runtime_retains_case_content": false,
+            "runtime_uses_public_query_type": true,
+            "evaluation_note": "A score on these same 20 personas is training-set/oracle-assisted; use persona-held-out or leave-one-persona-out evaluation to measure generalization."
+          },
+          "offline_student_policy_status": "loaded_builtin",
+          "offline_student_runtime_overlap": {
+            "public_query_type": true,
+            "aggregate_action_frequencies": true,
+            "aggregate_evidence_role_frequencies": true,
+            "aggregate_decision_check_frequencies": true,
+            "question_text": false,
+            "case_ids": false,
+            "persona_ids": false,
+            "patient_facts": false,
+            "gold_answers": false,
+            "judge_metadata": false,
+            "source_sessions": false,
+            "oracle_trajectories": false
+          },
+          "deterministic_question_temporal_gate": true,
+          "persistent_refine_boundary": true,
+          "hybrid_lexical_embedding_search": true,
+          "embedding_respects_structured_constraints": true,
+          "semantic_shortest_path_trace": true,
+          "state_update_answer_selected_memory_only": true,
+          "state_update_answer_excludes_assessor_artifacts": true,
+          "state_projection_conservative_refine": true,
+          "relative_date_documentation_lag_days": 30,
+          "patient_profile_version": "careharness-patient-profile-view.v4-historical-literal-delta",
+          "patient_profile_query_independent": true,
+          "patient_profile_unranked": true,
+          "patient_profile_includes_recent_navigation": false,
+          "patient_profile_recent_sessions_disjoint": true,
+          "profile_backing_nodes_excluded_from_retrieval": true,
+          "recent_session_window": 3,
+          "recent_sessions_unranked": true,
+          "historical_memory_only_investigation": true,
+          "answer_memory_edges_persistent_verified_source_grounded": true,
+          "query_time_connections_are_graph_facts": false
+        },
+        "action_policy_learning": {
+          "enabled": true,
+          "version": "careharness-action-value-model.v4-hierarchical-relative-return",
+          "model_hash": "1fac09003d5c15f02080e89c16665846e3281b92bc66fd7573d3cd5916658e9c",
+          "training_scope": {
+            "benchmark": "medmemorybench",
+            "splits": [
+              "dev"
+            ],
+            "persona_ids": [
+              1
+            ],
+            "noise": false,
+            "trajectory_count": 97,
+            "decision_count": 613,
+            "exploration_decision_count": 0,
+            "experiment_count": 1,
+            "experiment_hashes": [
+              "2192bf253d92a4b8"
+            ],
+            "excluded_result_count": 0,
+            "exclusion_counts": {
+              "non_score_result": 0,
+              "judge_infrastructure_failure": 0,
+              "memory_incomplete": 0,
+              "unscored_or_non_numeric": 0,
+              "incomplete_or_invalid_trajectory": 0
+            },
+            "comparison_mode_counts": {
+              "within_question": 0,
+              "cross_case_query_type": 97,
+              "calibrated_raw_score": 0
+            },
+            "uses_question_text": false,
+            "uses_task_label": true,
+            "uses_gold_or_judge_content": false,
+            "uses_post_answer_scalar_reward": true,
+            "reward_signal": "hierarchical_within_question_or_cross_case_query_type_or_calibrated_raw_score_plus_runtime_transition_progress",
+            "reward_interpretation": "correlational_weak_prior_not_causal_action_effect",
+            "causal_claim": false,
+            "propensity_weighting": "capped_inverse_conditional_assignment_probability",
+            "comparison_group_retained": false
+          },
+          "state_features": [
+            "query_type",
+            "node_count",
+            "assessment",
+            "missing_count",
+            "verification",
+            "last_worker",
+            "last_changed",
+            "stalled_discovery",
+            "discovery_count",
+            "assessment_count",
+            "remaining_budget",
+            "has_profile",
+            "has_recent_sessions"
+          ],
+          "prior_strength": 6
+        },
+        "action_policy_exploration": {
+          "enabled": false,
+          "rate": 0,
+          "seed": 0,
+          "training_only": true
+        },
+        "method_claims": {
+          "persistent_unified_memory_graph": true,
+          "policy_owned_investigation_state": true,
+          "static_query_preanalysis": false,
+          "transparent_query_type_adaptation": true,
+          "extensible_worker_registry": true,
+          "strict_causality_claimed": false,
+          "learned_policy_claimed": true,
+          "offline_student_policy_loaded": true
+        },
+        "manifest_hash": "429b7a2b2796f2de6b7114cb0d00f4bf642ba8da75999215fe64c5a3458a9073"
+      },
+      "metrics": {
+        "query_count": 97,
+        "scored_query_count": 97,
+        "classified_query_count": 97,
+        "wrong_answer_count": 37,
+        "failed_query_count": 0,
+        "judge_infrastructure_failure_count": 0,
+        "accuracy": 0.6185567010309279,
+        "average_score": 0.6265721649484535,
+        "average_patient_profile_items": 20.278350515463917,
+        "average_recent_sessions": 2.6907216494845363,
+        "average_candidate_memory_nodes": 7.628865979381444,
+        "average_retrieved_memory_nodes": 7.628865979381444,
+        "investigation_policy_calls": 694,
+        "investigation_policy_input_tokens": 8693251,
+        "investigation_policy_output_tokens": 205990,
+        "average_investigation_policy_latency_ms": 123391.3110309278,
+        "relation_evaluator_calls": 156,
+        "relation_evaluator_failed_calls": 1,
+        "relation_evaluator_input_tokens": 2557781,
+        "relation_evaluator_output_tokens": 92655,
+        "relation_evaluator_total_tokens": 2650436,
+        "average_relation_evaluator_latency_ms": 31808.395773195873,
+        "average_answer_input_tokens": 12115.247422680412,
+        "average_answer_latency_ms": 13778.114329896907,
+        "average_judge_input_tokens": 806.1551724137931,
+        "average_judge_latency_ms": 7723.906896551724,
+        "average_total_query_latency_ms": 195941.63917525773,
+        "average_investigation_steps": 7.154639175257732,
+        "candidate_zero_recall_queries": 6,
+        "zero_recall_queries": 0,
+        "memory_incomplete_queries": 0,
+        "by_query_type": {
+          "entity_exact_match": {
+            "count": 20,
+            "scored": 20,
+            "score_count": 20,
+            "failed": 0,
+            "judge_infrastructure_failures": 0,
+            "correct": 14,
+            "accuracy": 0.7,
+            "average_score": 0.7,
+            "candidate_zero_recall": 3,
+            "zero_recall": 0,
+            "memory_incomplete": 0
+          },
+          "temporal_localization": {
+            "count": 20,
+            "scored": 20,
+            "score_count": 20,
+            "failed": 0,
+            "judge_infrastructure_failures": 0,
+            "correct": 16,
+            "accuracy": 0.8,
+            "average_score": 0.8,
+            "candidate_zero_recall": 0,
+            "zero_recall": 0,
+            "memory_incomplete": 0
+          },
+          "state_update": {
+            "count": 10,
+            "scored": 10,
+            "score_count": 10,
+            "failed": 0,
+            "judge_infrastructure_failures": 0,
+            "correct": 6,
+            "accuracy": 0.6,
+            "average_score": 0.6,
+            "candidate_zero_recall": 0,
+            "zero_recall": 0,
+            "memory_incomplete": 0
+          },
+          "inference_generation": {
+            "count": 20,
+            "scored": 20,
+            "score_count": 20,
+            "failed": 0,
+            "judge_infrastructure_failures": 0,
+            "correct": 12,
+            "accuracy": 0.6,
+            "average_score": 0.6,
+            "candidate_zero_recall": 1,
+            "zero_recall": 0,
+            "memory_incomplete": 0
+          },
+          "multiple_choice": {
+            "count": 19,
+            "scored": 19,
+            "score_count": 19,
+            "failed": 0,
+            "judge_infrastructure_failures": 0,
+            "correct": 11,
+            "accuracy": 0.5789473684210527,
+            "average_score": 0.5789473684210527,
+            "candidate_zero_recall": 2,
+            "zero_recall": 0,
+            "memory_incomplete": 0
+          },
+          "multi_hop_clinical_deduction": {
+            "count": 8,
+            "scored": 8,
+            "score_count": 8,
+            "failed": 0,
+            "judge_infrastructure_failures": 0,
+            "correct": 1,
+            "accuracy": 0.125,
+            "average_score": 0.2221875,
+            "candidate_zero_recall": 0,
+            "zero_recall": 0,
+            "memory_incomplete": 0,
+            "total_nodes_validated": 32,
+            "avg_ncr": 0.40625,
+            "avg_crc": 0.125,
+            "avg_cc": 0.31249999999999994,
+            "node_mention_rate": 0.71875,
+            "node_causal_rate": 0.15625
+          }
+        }
+      }
+    }
+  ]
+}

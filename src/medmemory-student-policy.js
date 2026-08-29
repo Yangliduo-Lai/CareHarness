@@ -4,7 +4,7 @@ import { MEDMEMORY_INVESTIGATION_STRATEGIES,MEDMEMORY_INVESTIGATION_STRATEGY_VER
 import { MEDMEMORY_BUILTIN_STUDENT_ARTIFACT } from './medmemory-student-policy-artifact.js';
 
 export const MEDMEMORY_STUDENT_POLICY_RUNTIME_VERSION='medmemory-student-policy.runtime.v1-case-free-aggregate';
-export const MEDMEMORY_MATCHED_RUNTIME_VERSION='careharness-investigation-runtime.v13-explicit-packet-and-verification-status';
+export const MEDMEMORY_MATCHED_RUNTIME_VERSION='careharness-investigation-runtime.v14-relevance-before-earliest';
 
 const QUERY_TYPES=Object.freeze(Object.keys(MEDMEMORY_INVESTIGATION_STRATEGIES).sort());
 const STUDENT_VERSION='medmemory-student-strategy-summary.v2-action-role-patterns';

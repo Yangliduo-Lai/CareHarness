@@ -33,13 +33,21 @@ export function retrieveMemoryCandidates(request,memoryNodes=[],options={}){
     if(semanticEligible){score+=4+6*Math.max(0,Math.min(1,semanticScore))+3*(1-(semanticRank-1)/Math.max(1,allSemanticRanked.length));reasons.push('embedding_similarity');}
     if(!reasons.length)continue;
     if(['latest','current'].includes(spec.temporal_operator))score+=recencyScore(node,nodes);
-    if(spec.temporal_operator==='earliest')score+=earlinessScore(node,nodes);
+    // For earliest, relevance is primary and event time is the comparator
+    // tie-breaker below. A recency-sized bonus here used to let a weak generic
+    // precursor outrank the exact event the policy was trying to localize.
     const preferenceScore=temporalPreferenceScore(node,spec);if(preferenceScore){score+=preferenceScore;reasons.push('instruction_time_preference');}
     records.push({node,score:+score.toFixed(3),reasons,matched_terms:matched,numeric_matches:numericMatches,matched_lenses:lensMatches.map(item=>item.id),embedding_similarity:Number.isFinite(semanticScore)?+semanticScore.toFixed(6):null,embedding_rank:semanticRank||null});
   }
   const recordComparator=exactTemporalSemantic?compareExactTemporalSemantic:(left,right)=>right.score-left.score||compareTime(left.node,right.node,spec.temporal_preference||spec.temporal_operator)||String(left.node.memory_id).localeCompare(String(right.node.memory_id));
   records.sort(recordComparator);
-  const timeScoped=collapseTimepoint(records,spec.temporal_operator),diversity=partitionNearDuplicateRecords(timeScoped,recordComparator),selected=selectWithDiversityBackfill(diversity,spec,limit,exactTemporalSemantic,recordComparator),expanded=!exactTemporalSemantic&&spec.expand_graph?expandGraph(selected,nodes,edges,limit):selected,ranked=expanded.map((entry,index)=>({...entry,rank:index+1})),ids=new Set(ranked.map(entry=>String(entry.node.memory_id))),selectedEdges=edges.filter(edge=>ids.has(String(edge.from_memory_id))&&ids.has(String(edge.to_memory_id)));
+  // latest/current asks for the effective end of one matching trajectory, so
+  // collapsing to its latest matching date is useful. earliest is different:
+  // broad synonym/embedding probes often produce an old generic mention and a
+  // later, much stronger exact event. Collapsing before semantic ranking made
+  // the exact event unreachable. Keep all matching dates for earliest and let
+  // relevance + the time preference rank the candidate set.
+  const timeScoped=collapseCurrentTimepoint(records,spec.temporal_operator),diversity=partitionNearDuplicateRecords(timeScoped,recordComparator),selected=selectWithDiversityBackfill(diversity,spec,limit,exactTemporalSemantic,recordComparator),expanded=!exactTemporalSemantic&&spec.expand_graph?expandGraph(selected,nodes,edges,limit):selected,ranked=expanded.map((entry,index)=>({...entry,rank:index+1})),ids=new Set(ranked.map(entry=>String(entry.node.memory_id))),selectedEdges=edges.filter(edge=>ids.has(String(edge.from_memory_id))&&ids.has(String(edge.to_memory_id)));
   return{
     memory_nodes:ranked.map(entry=>entry.node),
     memory_edges:selectedEdges,
@@ -213,7 +221,7 @@ function temporalPreferenceScore(node,spec){
   const progress=Math.max(0,Math.min(1,(time-start)/(end-start)));return 4*(spec.temporal_preference==='earliest'?1-progress:progress);
 }
 function compareTime(left,right,operator){const a=Date.parse(left?.event_time||''),b=Date.parse(right?.event_time||'');if(!Number.isFinite(a)||!Number.isFinite(b)||a===b)return 0;return operator==='earliest'?a-b:b-a;}
-function collapseTimepoint(records,operator){if(!['latest','current','earliest'].includes(operator)||records.length<2)return records;const dated=records.map(record=>canonicalDate(record.node.event_time)).filter(Boolean);if(!dated.length)return records;const target=['latest','current'].includes(operator)?dated.sort().at(-1):dated.sort()[0];return records.filter(record=>canonicalDate(record.node.event_time)===target);}
+function collapseCurrentTimepoint(records,operator){if(!['latest','current'].includes(operator)||records.length<2)return records;const dated=records.map(record=>canonicalDate(record.node.event_time)).filter(Boolean);if(!dated.length)return records;const target=dated.sort().at(-1);return records.filter(record=>canonicalDate(record.node.event_time)===target);}
 function canonicalDate(value){const raw=String(value||'').trim(),match=/^(?<year>20\d{2})[-/.](?<month>\d{1,2})[-/.](?<day>\d{1,2})(?:$|[T\s])/u.exec(raw);if(!match)return'';const year=Number(match.groups.year),month=Number(match.groups.month),day=Number(match.groups.day),date=new Date(Date.UTC(year,month-1,day));return date.getUTCFullYear()===year&&date.getUTCMonth()===month-1&&date.getUTCDate()===day?date.toISOString().slice(0,10):'';}
 function canonicalMonth(value){const match=/^(20\d{2})[-/.年](\d{1,2})/.exec(String(value||''));return match?`${match[1]}-${String(match[2]).padStart(2,'0')}`:'';}
 function canonicalMonthOnly(value){const match=/^(20\d{2})[-/.年](\d{1,2})(?:月)?$/u.exec(String(value||'').trim());if(!match)return'';const month=Number(match[2]);return month>=1&&month<=12?`${match[1]}-${String(month).padStart(2,'0')}`:'';}

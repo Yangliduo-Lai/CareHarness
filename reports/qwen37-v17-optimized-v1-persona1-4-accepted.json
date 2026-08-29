@@ -1,0 +1,24 @@
+{
+  "report_version": "careharness-persona1-4-optimized.v1-accepted",
+  "generated_at": "2026-08-29T07:36:00.000Z",
+  "model": "qwen3.7-flash",
+  "memory_pipeline_version": "unified-memory-graph-v17-semantic-source-anchors",
+  "baseline_freeze_commit": "c393be1",
+  "personas": [
+    {"persona_id": 1, "split": "dev", "query_count": 97, "score": 0.6265721649484535, "baseline_score": 0.5493479381443299, "delta": 0.0772242268041236, "experiment_id": "7c05b280-b936-439e-a88e-9c900eeead1d"},
+    {"persona_id": 2, "split": "heldout", "query_count": 100, "score": 0.48002749999999994, "baseline_score": 0.47433749999999997, "delta": 0.005689999999999973, "experiment_id": "caa4f191-317a-4df1-8f4a-1f1b16212553"},
+    {"persona_id": 3, "split": "heldout", "query_count": 100, "score": 0.6925249999999998, "baseline_score": 0.5835835499999998, "delta": 0.10894145, "experiment_id": "0516e799-fdb0-4c4a-be6b-ceb6d3d88698"},
+    {"persona_id": 4, "split": "heldout", "query_count": 98, "score": 0.5433214285714286, "baseline_score": 0.4962653061224489, "delta": 0.04705612244897972, "experiment_id": "0b6d40b8-f95a-49c6-8527-dc4c7c7b6f90"}
+  ],
+  "total_query_count": 395,
+  "failed_query_count": 0,
+  "equal_persona_average": 0.5856115233799705,
+  "baseline_equal_persona_average": 0.5258835735666947,
+  "equal_persona_delta": 0.05972794981327578,
+  "query_weighted_average": 0.5855145569620253,
+  "baseline_query_weighted_average": 0.525855329113924,
+  "query_weighted_delta": 0.05965922784810129,
+  "acceptance": "accepted",
+  "acceptance_rule": "equal Persona average must strictly exceed the frozen baseline after integrity checks",
+  "verification": {"test_count": 346, "passed": 346, "failed": 0}
+}

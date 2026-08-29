@@ -122,7 +122,7 @@ test('MedMemory current decision tasks serialize the complete recent window befo
 });
 
 test('all six official MedMemory templates and transparent overlays stay centralized',()=>{
-  assert.equal(Object.keys(MEDMEMORY_ANSWER_PROMPT_TEMPLATES).length,6);assert.equal(Object.keys(MEDMEMORY_CAREHARNESS_ANSWER_OVERLAYS).length,6);assert.equal(PROMPTS.medmemory_answer.version,'medmemorybench-answer.appendix-v1-careharness-overlay-v23-literal-delta');
+  assert.equal(Object.keys(MEDMEMORY_ANSWER_PROMPT_TEMPLATES).length,6);assert.equal(Object.keys(MEDMEMORY_CAREHARNESS_ANSWER_OVERLAYS).length,6);assert.equal(PROMPTS.medmemory_answer.version,'medmemorybench-answer.appendix-v1-careharness-overlay-v24-single-entity-current-value');
   const messages=medMemoryAnswerMessages({task:'multiple_choice',question:'Q?',memory_nodes:[]});
   assert.deepEqual(messages.map(message=>message.role),['system','user']);assert.equal(messages[0].content,MEDMEMORY_SHARED_SYSTEM_PROMPT);
   assert.match(messages[1].content,/Output only the option letter\(s\), such as B or B,D/);assert.match(messages[1].content,new RegExp(MEDMEMORY_CHINESE_ANSWER_REQUIREMENT.replace(/[.*+?^${}()|[\]\\]/gu,'\\$&')));assert.match(messages[1].content,new RegExp(MEDMEMORY_QUERY_EVIDENCE_REQUIREMENT.replace(/[.*+?^${}()|[\]\\]/gu,'\\$&')));

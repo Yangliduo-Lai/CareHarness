@@ -14,7 +14,7 @@ export {
   validateInvestigationPolicyDecision,
 } from './matched-runtime.js';
 
-export const MATCHED_EXPERIMENT_VERSION = 'medmemory-matched-experiment.v30-grounded-relations-disjoint-context';
+export const MATCHED_EXPERIMENT_VERSION = 'medmemory-matched-experiment.v31-relevance-before-earliest';
 export const MEDMEMORY_MATCHED_QUERY_TYPES = Object.freeze(Object.keys(MEDMEMORY_QUERY_METRICS));
 const MEDMEMORY_MATCHED_QUERY_TYPE_SET = new Set(MEDMEMORY_MATCHED_QUERY_TYPES);
 

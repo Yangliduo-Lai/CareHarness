@@ -163,6 +163,13 @@ test('latest temporal operation collapses a trajectory to the latest matching ti
   assert.deepEqual(result.memory_nodes.map(item=>item.memory_id),['new']);
 });
 
+test('earliest temporal operation ranks semantic relevance before choosing an event date',()=>{
+  const generic=node('generic','医生建议以后可检查胰岛自身抗体。',{event_time:'2024-01-06'}),target=node('target','患者GADA抗体强阳性，滴度>2000 U/mL。',{event_time:'2024-03-23'});
+  const result=retrieveMemoryCandidates({question_request:createQuestionRequest('Q'),instruction:{search_terms:['GADA','强阳性','>2000'],expansion_terms:['胰岛自身抗体'],temporal:{operator:'earliest',prefer:'earliest'}}},[generic,target],{limit:4});
+  assert.equal(result.memory_nodes[0].memory_id,'target');
+  assert.deepEqual(new Set(result.memory_nodes.map(item=>item.memory_id)),new Set(['generic','target']));
+});
+
 test('persistent graph neighbors expand only when the current instruction requests it',()=>{
   const memories=[node('seed','患者确诊目标疾病。'),node('next','患者随后调整治疗。')],edges=[edge('seed','next')],base={question_request:createQuestionRequest('Q')};
   const without=retrieveMemoryCandidates({...base,instruction:{search_terms:['目标疾病']}},memories,{memory_edges:edges,limit:4});
