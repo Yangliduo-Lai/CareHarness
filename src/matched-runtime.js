@@ -6,6 +6,7 @@ import { runInvestigation } from './investigation-runtime.js';
 import { createMemoryInvestigationWorkers,deriveQuestionTemporalGate } from './investigation-workers.js';
 import { PROMPTS } from './prompts.js';
 import { assertStaticCareHarnessMode,positiveInteger } from './matched-utils.js';
+import { explicitDatesInText as datesInPolicyText,explicitMonthsInText as monthsInPolicyText } from './temporal-expressions.js';
 
 const RELATION_EVALUATOR_CALL_BUDGET=2;
 
@@ -234,7 +235,8 @@ function fallbackTemporalInstruction(question,refinementBoundary=null){
   if(dates.length&&!gate)return{temporal:{operator:'latest',start_date:[...dates].sort().at(-1),prefer:'latest'}};
   if(dates.length)return{temporal:{operator:'exact',date_keys:[gate?.target_date||dates[0]]}};
   const months=monthsInPolicyText(question);
-  if(months.length)return{temporal:{operator:'range',month_keys:months}};
+  if(months.length)return{temporal:{operator:'range',month_keys:months,...(isLatestStatusQuestion(question)?{prefer:'latest'}:{})}};
+  if(isLatestStatusQuestion(question))return{temporal:{operator:'latest',prefer:'latest'}};
   return isEarliestOccurrenceQuestion(question)?{temporal:{operator:'earliest',prefer:'earliest'}}:{};
 }
 function fallbackRefinementTemporalInstruction(question,currentInformation={},memoryIds=[]){
@@ -259,6 +261,7 @@ function hasEffectiveTemporalInstruction(value={}){
   return resolvePolicyTemporalDates(temporal).length>0||array(temporal.month_keys).some(value=>/^20\d{2}-\d{2}$/u.test(String(value)))||Boolean(canonicalPolicyDate(temporal.start_date)||canonicalPolicyDate(temporal.end_date))||['earliest','latest','current','history'].includes(operator);
 }
 function temporalDirectionInText(value){return/(?:prior\s+to|before|after|earliest|latest|first|initial|onset|截至|以前|之前|之后|以后|最初|首次|最早|最晚|当前|最新)/iu.test(String(value||''));}
+function isLatestStatusQuestion(value){return/(?:当前|目前|现在|如今|现阶段|最新|最近一次|至今|后来|后续|current(?:ly)?|now|latest|most\s+recent|at\s+present|since\s+then|subsequent(?:ly)?|afterwards)/iu.test(String(value||'').normalize('NFKC'));}
 function isEarliestOccurrenceQuestion(value){return/(?:最初|首次|最早|第一次|开始出现|起初|first|initial|onset|when\s+did\s+.*(?:begin|start))/iu.test(String(value||''));}
 function objectiveTemporalMatches(objective,temporal,dates){
   const text=String(objective||''),resolved=resolvePolicyTemporalDates(temporal),start=canonicalPolicyDate(temporal.start_date),end=canonicalPolicyDate(temporal.end_date),operator=String(temporal.operator||'').toLowerCase(),target=dates[0];
@@ -292,20 +295,6 @@ function resolvePolicyTemporalDates(temporal={}){
   const dates=datesInPolicyText(array(temporal.date_keys).join(' ')),base=canonicalPolicyDate(temporal.base_date),offset=Number(temporal.offset_days??0);
   if(base&&Number.isInteger(offset)&&Math.abs(offset)<=3660){const value=new Date(`${base}T00:00:00.000Z`);value.setUTCDate(value.getUTCDate()+offset);dates.push(value.toISOString().slice(0,10));}
   return[...new Set(dates)];
-}
-function datesInPolicyText(value){
-  const text=String(value||'').normalize('NFKC'),out=[];
-  for(const match of text.matchAll(/(?<year>20\d{2}|\d{2})\s*(?:年|[-/.])\s*(?<month>\d{1,2})\s*(?:月|[-/.])\s*(?<day>\d{1,2})(?:日)?/gu)){
-    const year=Number(match.groups.year)<100?2000+Number(match.groups.year):Number(match.groups.year),date=canonicalPolicyDate(`${year}-${match.groups.month}-${match.groups.day}`);if(date)out.push(date);
-  }
-  return[...new Set(out)];
-}
-function monthsInPolicyText(value){
-  const text=String(value||'').normalize('NFKC'),dates=datesInPolicyText(text),out=[];
-  for(const match of text.matchAll(/(?<year>20\d{2}|\d{2})\s*(?:年|[-/.])\s*(?<month>\d{1,2})(?:月)?(?!\s*[-/.年]?\s*\d)/gu)){
-    const year=Number(match.groups.year)<100?2000+Number(match.groups.year):Number(match.groups.year),month=Number(match.groups.month);if(month>=1&&month<=12)out.push(`${year}-${String(month).padStart(2,'0')}`);
-  }
-  return[...new Set(out.filter(month=>!dates.some(date=>date.startsWith(month))))];
 }
 function canonicalPolicyDate(value){
   const match=/^(?<year>20\d{2})[-/.](?<month>\d{1,2})[-/.](?<day>\d{1,2})$/u.exec(String(value||'').trim());if(!match)return'';

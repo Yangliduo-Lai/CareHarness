@@ -1,6 +1,7 @@
 import { applyInvestigationAssessment,contextualizeMemory,investigationAssessmentInput,refineWorkingMemory,searchMemory,traceMemoryGraph,verifyWorkingMemory } from './careharness-actions.js';
 import { assertNoHiddenBenchmarkInput } from './information-boundary.js';
 import { INVESTIGATION_ASSESSOR_UNAVAILABLE_MESSAGE,investigationWorkerResultSummary,memoryInvestigationWorkerPromptContracts } from './prompts.js';
+import { explicitDatesInText as datesInText,explicitMonthsInText as monthsInText } from './temporal-expressions.js';
 
 /**
  * Default worker plug-ins for a Memory Graph investigation. The closed-loop
@@ -215,6 +216,9 @@ function resolvedExactDates(temporal){
 }
 function groundTemporalInstruction(question,temporalValue,pool,currentNodes){
   const temporal=temporalValue&&typeof temporalValue==='object'&&!Array.isArray(temporalValue)?JSON.parse(JSON.stringify(temporalValue)):{},questionDates=datesInText(question),questionMonths=monthsInText(question,questionDates),currentDates=new Set(array(currentNodes).map(node=>canonicalDate(node?.event_time)).filter(Boolean));
+  // The LLM policy owns semantic operators such as latest/current/earliest.
+  // Deterministic grounding may override them only for an unambiguous calendar
+  // expression in the question, never for a decimal clinical measurement.
   if(!questionDates.length&&questionMonths.length)return{operator:'range',month_keys:questionMonths};
   const suppliedDates=[...array(temporal.date_keys).map(canonicalDate),canonicalDate(temporal.base_date),canonicalDate(temporal.start_date),canonicalDate(temporal.end_date)].filter(Boolean),grounded=suppliedDates.every(date=>questionDates.includes(date)||currentDates.has(date));
   if(suppliedDates.length&&!grounded){
@@ -262,8 +266,6 @@ function clinicalRoleCandidates(nodes,priorityIds=[]){
 function roleUtility(node,priority){return(priority.has(String(node?.memory_id))?8:0)+(String(node?.memory_id||'').includes(':llm:')?2:0)+(/\d/.test(String(node?.text||''))?1:0);}
 function requiresClinicalReasoning(value){return/(?:为什么|原因|怎么回事|意味着|说明|导致|关系|要不要|需不需要|是否需要|该不该|能不能|可不可以|建议|调整|加量|减量|换药|停药|恢复|影响|风险|判断)/u.test(String(value||''));}
 function questionText(value){return String(value?.question||value||'').normalize('NFKC');}
-function datesInText(value){const text=String(value||'').normalize('NFKC'),out=[];for(const match of text.matchAll(/(?<year>20\d{2}|\d{2})\s*(?:年|[-/.])\s*(?<month>\d{1,2})\s*(?:月|[-/.])\s*(?<day>\d{1,2})(?:日)?/gu)){const year=Number(match.groups.year)<100?2000+Number(match.groups.year):Number(match.groups.year),month=Number(match.groups.month),day=Number(match.groups.day),date=canonicalDate(`${year}-${month}-${day}`);if(date)out.push(date);}return[...new Set(out)];}
-function monthsInText(value,exactDates=[]){const text=String(value||'').normalize('NFKC'),out=[];for(const match of text.matchAll(/(?<year>20\d{2}|[2-9]\d)\s*(?:年|[-/.])\s*(?<month>\d{1,2})(?:月)?(?!\s*[-/.年]?\s*\d)/gu)){const rawYear=Number(match.groups.year),year=rawYear<100?2000+rawYear:rawYear,month=Number(match.groups.month);if(month>=1&&month<=12)out.push(`${year}-${String(month).padStart(2,'0')}`);}for(const date of exactDates){const index=out.indexOf(date.slice(0,7));if(index>=0)out.splice(index,1);}return[...new Set(out)];}
 function relativeDateOffset(value){const text=String(value||'').normalize('NFKC');if(/(?:大前天|三天前)/u.test(text))return-3;if(/(?:大后天|三天后)/u.test(text))return 3;if(/(?:前天|两天前)/u.test(text))return-2;if(/(?:后天|两天后)/u.test(text))return 2;if(/(?:前一日|前一天|上一日|前日|previous day)/iu.test(text))return-1;if(/(?:次日|翌日|第二天|后一天|下一日|next day)/iu.test(text))return 1;return null;}
 function asksForLatestStatus(value){return/(?:当前|目前|现在|如今|现今|现阶段|眼下|时下|最新|最近一次|至今|current(?:ly)?|now|today|latest|most\s+recent|at\s+present|since\s+then)/iu.test(String(value||'').normalize('NFKC'));}
 function hasExplicitDateRangeSyntax(value){return/(?:\d(?:日)?\s*(?:至|到)\s*20\d{2}|之间|期间|\bfrom\b[\s\S]*\bto\b|\bbetween\b[\s\S]*\band\b)/iu.test(String(value||'').normalize('NFKC'));}

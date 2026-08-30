@@ -20,7 +20,7 @@ export function retrieveMemoryCandidates(request,memoryNodes=[],options={}){
     if(!matchesConstraints(node,text,matched,terms,spec,semanticEligible))continue;
     let score=spec.has_hard_constraints?1:0;
     if(spec.has_hard_constraints)reasons.push('instruction_constraint');
-    if(matched.length){score+=matched.reduce((sum,term)=>sum+Math.min(5,1+normalize(term).length/3),0);reasons.push('instruction_term');}
+    if(matched.length){score+=lexicalMatchScore(matched);reasons.push('instruction_term');}
     const date=canonicalDate(node.event_time),month=date.slice(0,7);
     if(date&&spec.date_keys.has(date)){score+=10;reasons.push('instruction_date');}
     if(month&&spec.month_keys.has(month)){score+=7;reasons.push('instruction_month');}
@@ -41,18 +41,16 @@ export function retrieveMemoryCandidates(request,memoryNodes=[],options={}){
   }
   const recordComparator=exactTemporalSemantic?compareExactTemporalSemantic:(left,right)=>right.score-left.score||compareTime(left.node,right.node,spec.temporal_preference||spec.temporal_operator)||String(left.node.memory_id).localeCompare(String(right.node.memory_id));
   records.sort(recordComparator);
-  // latest/current asks for the effective end of one matching trajectory, so
-  // collapsing to its latest matching date is useful. earliest is different:
-  // broad synonym/embedding probes often produce an old generic mention and a
-  // later, much stronger exact event. Collapsing before semantic ranking made
-  // the exact event unreachable. Keep all matching dates for earliest and let
-  // relevance + the time preference rank the candidate set.
-  const timeScoped=collapseCurrentTimepoint(records,spec.temporal_operator),diversity=partitionNearDuplicateRecords(timeScoped,recordComparator),selected=selectWithDiversityBackfill(diversity,spec,limit,exactTemporalSemantic,recordComparator),expanded=!exactTemporalSemantic&&spec.expand_graph?expandGraph(selected,nodes,edges,limit):selected,ranked=expanded.map((entry,index)=>({...entry,rank:index+1})),ids=new Set(ranked.map(entry=>String(entry.node.memory_id))),selectedEdges=edges.filter(edge=>ids.has(String(edge.from_memory_id))&&ids.has(String(edge.to_memory_id)));
+  // latest/current without an explicit calendar scope is a ranking preference,
+  // not permission to discard every earlier answer-bearing record. Relevance
+  // and payload-bearing matches remain available; exact dates/ranges were
+  // already enforced as hard constraints by matchesConstraints above.
+  const timeScoped=records,diversity=partitionNearDuplicateRecords(timeScoped,recordComparator),selected=selectWithDiversityBackfill(diversity,spec,limit,exactTemporalSemantic,recordComparator),expanded=!exactTemporalSemantic&&spec.expand_graph?expandGraph(selected,nodes,edges,limit):selected,ranked=expanded.map((entry,index)=>({...entry,rank:index+1})),ids=new Set(ranked.map(entry=>String(entry.node.memory_id))),selectedEdges=edges.filter(edge=>ids.has(String(edge.from_memory_id))&&ids.has(String(edge.to_memory_id)));
   return{
     memory_nodes:ranked.map(entry=>entry.node),
     memory_edges:selectedEdges,
     candidates:ranked.map(candidateTrace),
-    trace:{version:'careharness-memory-retrieval.worker-v7-conservative-diversity',memory_pool_size:nodes.length,candidate_count:records.length,near_duplicate_candidate_count:diversity.deferred.length,distinct_fact_candidate_count:diversity.primary.length,selected_memory_count:ranked.length,selected_edge_count:selectedEdges.length,selection_mode:exactTemporalSemantic?'exact_temporal_embedding_top_k':semanticRanked.length?'policy_instruction_hybrid_lexical_embedding':'policy_instruction_only',lexical_filter_mode:spec.has_exact_scope?'rank_within_exact_scope':semanticRanked.length?'filter_by_terms_or_embedding_top_k':'filter_by_terms',ranking_primary:exactTemporalSemantic?'embedding_similarity':'composite_score',embedding_candidate_count:semanticRanked.length,embedding_scored_scope_count:allSemanticRanked.length,resolved_temporal:spec.resolved_temporal,zero_recall:ranked.length===0,worker_instruction:retrieval.instruction,ranked:ranked.map(candidateTrace)},
+    trace:{version:'careharness-memory-retrieval.worker-v8-soft-relative-time',memory_pool_size:nodes.length,candidate_count:records.length,near_duplicate_candidate_count:diversity.deferred.length,distinct_fact_candidate_count:diversity.primary.length,selected_memory_count:ranked.length,selected_edge_count:selectedEdges.length,selection_mode:exactTemporalSemantic?'exact_temporal_embedding_top_k':semanticRanked.length?'policy_instruction_hybrid_lexical_embedding':'policy_instruction_only',lexical_filter_mode:spec.has_exact_scope?'rank_within_exact_scope':semanticRanked.length?'filter_by_terms_or_embedding_top_k':'filter_by_terms',ranking_primary:exactTemporalSemantic?'embedding_similarity':'composite_score',embedding_candidate_count:semanticRanked.length,embedding_scored_scope_count:allSemanticRanked.length,resolved_temporal:spec.resolved_temporal,zero_recall:ranked.length===0,worker_instruction:retrieval.instruction,ranked:ranked.map(candidateTrace)},
   };
 }
 
@@ -62,7 +60,7 @@ export function retrieveSessionMemoryAnchors(request,memoryNodes=[],options={}){
   const ranked=[];
   for(const group of groups.values()){
     const qualifying=group.nodes.map(node=>{const text=normalize([node.text,node.source_text].filter(Boolean).join(' ')),matched=terms.filter(term=>text.includes(normalize(term)));return{node,text,matched};}).filter(item=>matchesConstraints(item.node,item.text,item.matched,terms,spec));if(!qualifying.length)continue;
-    const matched=unique(qualifying.flatMap(item=>item.matched)),familyWeight=Math.max(0,...qualifying.map(item=>familyScore(item.node,spec.family_weights)));let score=(spec.has_hard_constraints?1:0)+matched.reduce((sum,term)=>sum+Math.min(5,1+normalize(term).length/3),0)+familyWeight;
+    const matched=unique(qualifying.flatMap(item=>item.matched)),familyWeight=Math.max(0,...qualifying.map(item=>familyScore(item.node,spec.family_weights)));let score=(spec.has_hard_constraints?1:0)+lexicalMatchScore(matched)+familyWeight;
     if(['latest','current'].includes(spec.temporal_operator))score+=recencyScore(group,[...groups.values()]);
     if(spec.temporal_operator==='earliest')score+=earlinessScore(group,[...groups.values()]);
     score+=temporalPreferenceScore(group,spec);
@@ -127,8 +125,10 @@ function normalizeTemporalInstruction(value){
 function normalizeFamilyWeights(value){const out=[],seen=new Set();for(const raw of array(value)){const family=String(typeof raw==='string'?raw:raw?.family||'').toUpperCase();if(!MEMORY_FAMILIES.includes(family)||seen.has(family))continue;seen.add(family);const weight=typeof raw==='string'?1:Number(raw.weight??raw.priority??1);out.push({family,weight:Number.isFinite(weight)?Math.max(0,Math.min(8,weight)):1});}return out;}
 function normalizeFamilies(value){return unique(value).map(item=>item.toUpperCase()).filter(item=>MEMORY_FAMILIES.includes(item));}
 function normalizeLenses(value){return array(value).slice(0,24).map((item,index)=>typeof item==='string'?{id:`lens_${index+1}`,terms:objectiveTerms(item)}:{id:String(item?.id||`lens_${index+1}`),terms:unique([...toArray(item?.terms),...objectiveTerms(item?.objective)])}).filter(item=>item.terms.length);}
-function objectiveTerms(value){const text=bounded(value,500),chunks=text.match(/[\p{Script=Han}]{2,}|[A-Za-z][A-Za-z0-9+.-]{1,}|\d+(?:\.\d+)?(?:\s*[-–~至]\s*\d+(?:\.\d+)?)?\s*(?:mmol\/L|mg|kg|%|U\/mL|pmol\/L|次|分钟|小时|天)?/gu)||[],terms=[];for(const chunk of chunks){terms.push(chunk);if(/[\p{Script=Han}]/u.test(chunk)&&chunk.length>=4)for(let size=Math.min(6,chunk.length-1);size>=2;size--)for(let index=0;index<=chunk.length-size;index++)terms.push(chunk.slice(index,index+size));}return unique(terms).filter(term=>!STOP_TERMS.has(term)&&normalize(term).length>=2).slice(0,80);}
-function expandLiteralTerms(value){const originals=unique(value),expanded=[];for(const term of originals){expanded.push(term);for(const piece of String(term).split(/[\s,，;；|/]+/u)){const clean=piece.trim();if(normalize(clean).length>=2&&!STOP_TERMS.has(clean))expanded.push(clean);}if(expanded.length>=160)break;}return unique(expanded).slice(0,160);}
+function objectiveTerms(value){const text=bounded(value,500),chunks=text.match(/[\p{Script=Han}]{2,}|[A-Za-z][A-Za-z0-9+.-]{1,}|\d+(?:\.\d+)?(?:\s*[-–~至]\s*\d+(?:\.\d+)?)?\s*(?:mmol\/L|mg|kg|%|U\/mL|pmol\/L|次|分钟|小时|天)?/gu)||[],terms=[];for(const chunk of chunks){terms.push(chunk,...decimalIntegerTerms(chunk));if(/[\p{Script=Han}]/u.test(chunk)&&chunk.length>=4)for(let size=Math.min(6,chunk.length-1);size>=2;size--)for(let index=0;index<=chunk.length-size;index++)terms.push(chunk.slice(index,index+size));}return unique(terms).filter(term=>!STOP_TERMS.has(term)&&normalize(term).length>=2).slice(0,80);}
+function expandLiteralTerms(value){const originals=unique(value),expanded=[];for(const term of originals){expanded.push(term,...decimalIntegerTerms(term));for(const piece of String(term).split(/[\s,，;；|/]+/u)){const clean=piece.trim();if(normalize(clean).length>=2&&!STOP_TERMS.has(clean))expanded.push(clean,...decimalIntegerTerms(clean));}if(expanded.length>=160)break;}return unique(expanded).slice(0,160);}
+function decimalIntegerTerms(value){const terms=[];for(const match of String(value||'').matchAll(/(?<!\d)(\d+)\.\d+(?!\d)/gu))if(match[1].length>=2)terms.push(match[1]);return terms;}
+function lexicalMatchScore(value){const entries=unique(value).map(term=>({term,key:normalize(term),score:Math.min(5,1+normalize(term).length/3)})).filter(item=>item.key),groups=[];for(const entry of entries){const linked=[];for(let index=0;index<groups.length;index++)if(groups[index].some(item=>item.key.includes(entry.key)||entry.key.includes(item.key)))linked.push(index);if(!linked.length){groups.push([entry]);continue;}const merged=[entry];for(const index of linked.reverse())merged.push(...groups.splice(index,1)[0]);groups.push(merged);}return groups.reduce((sum,group)=>sum+group.reduce((groupSum,item)=>groupSum+item.score,0)/group.length,0);}
 const STOP_TERMS=new Set(['医生','患者','什么','怎么','为什么','是否','需要','可以','应该','目前','现在','最近','一下','这个','那个','情况','问题','查找','调查','确认','寻找','相关']);
 function searchTerms(spec){return spec.terms.filter(term=>normalize(term).length>=2);}
 function matchesConstraints(node,text,matched,terms,spec,semanticEligible=false){
@@ -221,7 +221,6 @@ function temporalPreferenceScore(node,spec){
   const progress=Math.max(0,Math.min(1,(time-start)/(end-start)));return 4*(spec.temporal_preference==='earliest'?1-progress:progress);
 }
 function compareTime(left,right,operator){const a=Date.parse(left?.event_time||''),b=Date.parse(right?.event_time||'');if(!Number.isFinite(a)||!Number.isFinite(b)||a===b)return 0;return operator==='earliest'?a-b:b-a;}
-function collapseCurrentTimepoint(records,operator){if(!['latest','current'].includes(operator)||records.length<2)return records;const dated=records.map(record=>canonicalDate(record.node.event_time)).filter(Boolean);if(!dated.length)return records;const target=dated.sort().at(-1);return records.filter(record=>canonicalDate(record.node.event_time)===target);}
 function canonicalDate(value){const raw=String(value||'').trim(),match=/^(?<year>20\d{2})[-/.](?<month>\d{1,2})[-/.](?<day>\d{1,2})(?:$|[T\s])/u.exec(raw);if(!match)return'';const year=Number(match.groups.year),month=Number(match.groups.month),day=Number(match.groups.day),date=new Date(Date.UTC(year,month-1,day));return date.getUTCFullYear()===year&&date.getUTCMonth()===month-1&&date.getUTCDate()===day?date.toISOString().slice(0,10):'';}
 function canonicalMonth(value){const match=/^(20\d{2})[-/.年](\d{1,2})/.exec(String(value||''));return match?`${match[1]}-${String(match[2]).padStart(2,'0')}`:'';}
 function canonicalMonthOnly(value){const match=/^(20\d{2})[-/.年](\d{1,2})(?:月)?$/u.exec(String(value||'').trim());if(!match)return'';const month=Number(match[2]);return month>=1&&month<=12?`${match[1]}-${String(month).padStart(2,'0')}`:'';}

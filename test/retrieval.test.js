@@ -127,10 +127,21 @@ test('an exact date semantically ranks every in-scope State before applying the 
 });
 
 test('decimal clinical measurements are not misread as two-digit year and month scopes',()=>{
-  const target=node('target','患者餐后血糖升至 15.1 mmol/L。',{event_time:'2024-09-18'}),workers=createMemoryInvestigationWorkers({question_request:createQuestionRequest('患者餐后血糖升至15.1 mmol/L的情况被记录在什么时间？'),memory_nodes:[target]});
-  const result=workers.search.run({state:{snapshot:{memory_nodes:[],memory_edges:[]}},instruction:{search_terms:['餐后血糖','15.1','mmol/L'],temporal:{operator:'none'}}});
-  assert.deepEqual(result.snapshot.memory_nodes.map(item=>item.memory_id),['target']);
-  assert.deepEqual(result.trace.resolved_temporal.month_keys,[]);
+  const cases=[
+    ['患者餐后血糖升至15.1 mmol/L的情况被记录在什么时间？','15.1'],
+    ['患者之前的体重维持在约66.5kg，请问最近一次体重记录是多少？','66.5'],
+    ['患者体重曾达到68.5公斤，请问目前体重状态如何？','68.5'],
+    ['患者血压曾为90.7 mmHg，请问最近一次记录是多少？','90.7'],
+    ['患者UACR曾为52.3 mg/g，请问当前结果是多少？','52.3'],
+    ['患者某项指标曾为120.3，请问最新结果是多少？','120.3'],
+  ];
+  for(const[question,term]of cases){
+    const target=node(`target-${term}`,question,{event_time:'2024-09-18'}),workers=createMemoryInvestigationWorkers({question_request:createQuestionRequest(question),memory_nodes:[target]});
+    const result=workers.search.run({state:{snapshot:{memory_nodes:[],memory_edges:[]}},instruction:{search_terms:[term],temporal:{operator:'latest'}}});
+    assert.deepEqual(result.snapshot.memory_nodes.map(item=>item.memory_id),[`target-${term}`]);
+    assert.equal(result.trace.resolved_temporal.operator,'latest');
+    assert.deepEqual(result.trace.resolved_temporal.month_keys,[]);
+  }
 });
 
 test('an invented Session hint cannot override a grounded exact question date',()=>{
@@ -157,10 +168,24 @@ test('relative dates enforce a forward documentation window and rank the nearest
   assert.ok(result.snapshot.memory_nodes.every(item=>item.event_time>='2024-01-16'&&item.event_time<='2024-02-15'));
 });
 
-test('latest temporal operation collapses a trajectory to the latest matching timepoint',()=>{
+test('latest temporal operation ranks a trajectory without discarding earlier answer-bearing records',()=>{
   const memories=[node('old','患者晨起心率为90次/分。',{event_time:'2024-06-28'}),node('new','患者晨起心率为72次/分。',{event_time:'2024-11-02'}),node('unrelated','患者睡眠改善。',{event_time:'2024-12-01'})];
   const result=retrieveMemoryCandidates({question_request:createQuestionRequest('Q'),instruction:{search_terms:['晨起心率'],temporal:{operator:'latest'}}},memories);
-  assert.deepEqual(result.memory_nodes.map(item=>item.memory_id),['new']);
+  assert.deepEqual(result.memory_nodes.map(item=>item.memory_id),['new','old']);
+});
+
+test('a newer generic factor mention cannot hide the latest explicit measurement',()=>{
+  const memories=[node('baseline','患者之前的体重维持在约66.5kg。',{event_time:'2024-01-10'}),node('measurement','患者近期体重从66点多升至68.5kg。',{event_time:'2024-03-16'}),node('generic','医生解释完全不动时体重和水分更容易反弹。',{event_time:'2024-04-10'})];
+  const result=retrieveMemoryCandidates({question_request:createQuestionRequest('患者之前的体重维持在约66.5kg，请问最近一次体重记录是多少？'),instruction:{objective:'寻找包含明确体重测量值和单位的记录，再从这些有效记录中确定最近一次',search_terms:['体重','kg','公斤','记录'],temporal:{operator:'none',prefer:'latest'}}},memories,{limit:3});
+  assert.equal(result.memory_nodes[0].memory_id,'measurement');
+  assert.deepEqual(new Set(result.memory_nodes.map(item=>item.memory_id)),new Set(['baseline','measurement','generic']));
+});
+
+test('overlapping lexical fragments contribute their average and a decimal also recalls its integer stem',()=>{
+  const repeated=node('repeated','患者体重维持在原水平。',{event_time:'2024-01-10'}),transition=node('transition','患者体重从66点多升至新的水平。',{event_time:'2024-03-16'}),instruction={search_terms:['体重维持在','体重维持','维持在','体重','66.5','升至'],temporal:{operator:'none',prefer:'latest'}},result=retrieveMemoryCandidates({question_request:createQuestionRequest('Q'),instruction},[repeated,transition],{limit:4});
+  assert.deepEqual(result.memory_nodes.map(item=>item.memory_id),['transition','repeated']);
+  assert.equal(result.candidates[0].matched_terms.includes('66'),true);
+  assert.ok(result.candidates[1].score<4,'overlapping phrase fragments must not be summed independently');
 });
 
 test('earliest temporal operation ranks semantic relevance before choosing an event date',()=>{

@@ -61,7 +61,7 @@ test('question temporal gate distinguishes historical baselines, exact events, r
 
 test('a current-status Search can cross an explicit historical baseline date',async()=>{
   const base={observation_id:'o',subject_id:'p',source_type:'structured',episode_id:'session-1',turn_id:'1',certainty:1,polarity:'affirmed',families:['LO'],status:'active',version:1},baseline={...base,memory_id:'baseline',text:'设备基线读数为四十。',event_time:'2023-02-04'},current={...base,memory_id:'current',observation_id:'o-current',episode_id:'session-2',text:'设备当前读数为二十。',event_time:'2023-08-11'},workers=createMemoryInvestigationWorkers({question_request:{query_type:'state_update',question:'设备在2023-02-04记录过一个基线值，目前的读数是多少？'},memory_nodes:[baseline,current],memory_edges:[],candidate_budget:8}),result=await workers.search.run({state:{snapshot:{memory_nodes:[],memory_edges:[],patient_profile:null,recent_sessions:[]}},instruction:{search_terms:['设备','读数'],temporal:{operator:'latest',start_date:'2023-02-04',prefer:'latest'}}});
-  assert.equal(result.snapshot.temporal_gate,null);assert.deepEqual(result.snapshot.memory_nodes.map(node=>node.memory_id),['current']);
+  assert.equal(result.snapshot.temporal_gate,null);assert.deepEqual(result.snapshot.memory_nodes.map(node=>node.memory_id),['current','baseline']);
 });
 
 test('Search Context and Trace expose one discovery result-signal shape and Context reports zero recall',async()=>{

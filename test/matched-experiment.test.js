@@ -122,6 +122,14 @@ test('policy fallback retains a turn-local exact date constraint without changin
   assert.deepEqual(decision.instruction.temporal,{operator:'exact',date_keys:['2024-01-05']});
 });
 
+test('policy fallback preserves latest semantics when a clinical decimal resembles a year-month',()=>{
+  const question='患者之前的体重维持在约66.5kg，请问最近一次体重记录是多少？',input={question,allowed_workers:['search'],current_information:{memory_nodes:[],recent_sessions:[],patient_profile:null}};
+  const fallback=fallbackInvestigationPolicyDecision(input);
+  assert.equal(fallback.worker,'search');
+  assert.deepEqual(fallback.instruction.temporal,{operator:'latest',prefer:'latest'});
+  assert.equal(fallback.instruction.objective,question);
+});
+
 test('validator-aware fallback does not repeat a raw or effective no-progress Search',()=>{
   const question='患者自2024/1/5开始出现什么症状？',temporal={operator:'exact',date_keys:['2024-01-05']},input={allowed_workers:['search'],question,current_information:{memory_nodes:[]},previous_steps:[{worker:'search',instruction:{objective:question,temporal},effective_instruction:{objective:question,temporal},changed:false}]};
   const decision=fallbackInvestigationPolicyDecision(input);

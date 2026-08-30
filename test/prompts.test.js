@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import {
   BENCHMARK_ANSWER_PROMPTS,MEDMEMORY_ANSWER_PROMPT_TEMPLATES,MEDMEMORY_CAREHARNESS_ANSWER_OVERLAYS,
   INVESTIGATION_ASSESSOR_NAVIGATION_PATH_POLICY,INVESTIGATION_POLICY_NAVIGATION_PATH_POLICY,LEARNED_ACTION_PRIOR_ADVICE,
-  MEDMEMORY_CHINESE_ANSWER_REQUIREMENT,MEDMEMORY_CHINESE_JUDGE_REQUIREMENT,MEDMEMORY_IG_FINAL_STATE_COVERAGE_REQUIREMENT,
+  MEDMEMORY_CHINESE_ANSWER_REQUIREMENT,MEDMEMORY_CHINESE_JUDGE_REQUIREMENT,MEDMEMORY_IG_FINAL_STATE_COVERAGE_REQUIREMENT,MEDMEMORY_MQ_CARDINALITY_PATCH,
   MEDMEMORY_LITERAL_SUPPLEMENT_REQUIREMENT,MEDMEMORY_QUERY_EVIDENCE_REQUIREMENT,MEDMEMORY_SHARED_SYSTEM_PROMPT,MEDMEMORY_STATE_ONLY_REQUIREMENT,PROMPTS,benchmarkAnswerContract,
   compactMedMemorySource,cpcdAnswerMessages,investigationAssessmentModelContract,investigationPolicyWorkerCapabilityModelContext,medMemoryAnswerMessages,memoryInvestigationWorkerPromptContracts,
   promptFor,renderMedMemoryJudgePrompt
@@ -32,6 +32,8 @@ test('investigation policy is the only query-time planning prompt and receives n
   assert.match(PROMPTS.investigation_policy.contract,/date copied only into objective or search_terms does not filter Memory Node event_time/);
   assert.match(PROMPTS.investigation_policy.contract,/"base_date":"YYYY-MM-DD","offset_days":1 or -1/);
   assert.match(PROMPTS.investigation_policy.contract,/current_information\.temporal_gate/);assert.match(PROMPTS.investigation_policy.contract,/stop searching and select Assess/);
+  assert.match(PROMPTS.investigation_policy.contract,/Latest.*ranking preferences, not hard date boundaries/);
+  assert.match(PROMPTS.investigation_policy.contract,/search the factor, baseline literal, and likely change\/update wording together/);
   for(const hardcodedTerm of ['DPP-4','C肽','自身免疫性糖尿病','布洛芬'])assert.doesNotMatch(PROMPTS.investigation_policy.contract,new RegExp(hardcodedTerm));
   for(const term of ['node_blueprint','state_scopes','temporal_operator','relation_goals','target_slot_ids'])assert.doesNotMatch(PROMPTS.investigation_policy.contract,new RegExp(term));
 });
@@ -73,7 +75,7 @@ test('MedMemory source restores an omitted negation but emits nothing when no pr
   assert.deepEqual(source.historical_memory_nodes[0].literal_supplement,[{kind:'negation',text:'没有'}]);
   assert.equal(source.historical_memory_nodes[1].literal_supplement,undefined);
   assert.equal(JSON.stringify(source).includes('公园散步'),false);
-  const prompt=medMemoryAnswerMessages({task:'entity_exact_match',question:'Q',memory_nodes:[]})[1].content;
+  const prompt=medMemoryAnswerMessages({task:'temporal_localization',question:'Q',memory_nodes:[]})[1].content;
   assert.match(prompt,new RegExp(MEDMEMORY_LITERAL_SUPPLEMENT_REQUIREMENT.replace(/[.*+?^${}()|[\]\\]/gu,'\\$&')));
 });
 
@@ -108,7 +110,8 @@ test('MedMemory SUA Answer receives only Refine-selected Memory states',()=>{
   assert.deepEqual(Object.keys(source),['selected_memory_nodes']);
   assert.deepEqual(source.selected_memory_nodes.map(node=>node.memory_id),['old','current']);
   assert.equal(source.selected_memory_nodes[1].event_time,'2024-03-10');assert.equal(source.selected_memory_nodes[1].status,'active');assert.equal(source.selected_memory_nodes[1].version,2);
-  assert.match(prompt,/"selected_memory_nodes"/);assert.match(prompt,new RegExp(MEDMEMORY_STATE_ONLY_REQUIREMENT.replace(/[.*+?^${}()|[\]\\]/gu,'\\$&')));
+  assert.match(prompt,/"selected_memory_nodes"/);assert.match(prompt,/Answer Requirements: 1\. Describe the patient’s most recent status\. 2\. Reflect important changes over time when necessary\. 3\. Maintain a warm yet professional tone\. 4\. Be concise and direct\.\nAnswer:$/u);
+  assert.doesNotMatch(prompt,/State Evidence Requirement|Literal Supplement Requirement|CareHarness Task Overlay|Language Requirement/u);
   for(const artifact of ['patient_profile','recent_sessions','memory_edges','query_evidence_brief','answer_focus','reasoning_hypotheses','Assessor 归纳','Assessor 构造的因果关系'])assert.equal(prompt.includes(artifact),false,artifact);
   assert.match(transportPrompt,/"memory_id":"current"/);assert.equal(transportPrompt.includes('不应透传'),false);
 });
@@ -122,10 +125,10 @@ test('MedMemory current decision tasks serialize the complete recent window befo
 });
 
 test('all six official MedMemory templates and transparent overlays stay centralized',()=>{
-  assert.equal(Object.keys(MEDMEMORY_ANSWER_PROMPT_TEMPLATES).length,6);assert.equal(Object.keys(MEDMEMORY_CAREHARNESS_ANSWER_OVERLAYS).length,6);assert.equal(PROMPTS.medmemory_answer.version,'medmemorybench-answer.appendix-v1-careharness-overlay-v24-single-entity-current-value');
+  assert.equal(Object.keys(MEDMEMORY_ANSWER_PROMPT_TEMPLATES).length,6);assert.equal(Object.keys(MEDMEMORY_CAREHARNESS_ANSWER_OVERLAYS).length,6);assert.equal(PROMPTS.medmemory_answer.version,'medmemorybench-answer.appendix-v1-careharness-overlay-v31-mq-cardinality');
   const messages=medMemoryAnswerMessages({task:'multiple_choice',question:'Q?',memory_nodes:[]});
   assert.deepEqual(messages.map(message=>message.role),['system','user']);assert.equal(messages[0].content,MEDMEMORY_SHARED_SYSTEM_PROMPT);
-  assert.match(messages[1].content,/Output only the option letter\(s\), such as B or B,D/);assert.match(messages[1].content,new RegExp(MEDMEMORY_CHINESE_ANSWER_REQUIREMENT.replace(/[.*+?^${}()|[\]\\]/gu,'\\$&')));assert.match(messages[1].content,new RegExp(MEDMEMORY_QUERY_EVIDENCE_REQUIREMENT.replace(/[.*+?^${}()|[\]\\]/gu,'\\$&')));
+  assert.match(messages[1].content,/Output only the option letter\(s\), such as B or B,D/);
 });
 
 test('MedMemory IG audits source-cited must-use states without copying the whole candidate packet',()=>{
@@ -137,9 +140,26 @@ test('MedMemory IG audits source-cited must-use states without copying the whole
   assert.doesNotMatch(tla,/IG Final-State Coverage Requirement/);
 });
 
-test('MedMemory EEM preserves an explicit category term instead of replacing it with members',()=>{
+test('MedMemory EEM adds only the deterministic numeric-format patch to the official template',()=>{
   const prompt=medMemoryAnswerMessages({task:'entity_exact_match',question:'医生怀疑哪类药物出现继发性药效减弱？',memory_nodes:[{memory_id:'m1',text:'患者的口服药出现继发性药效变弱趋势。',families:['PE']}],memory_edges:[]})[1].content;
-  assert.match(prompt,/preserve an explicit category term/);
+  assert.match(prompt,/Answer Requirements: 1\. Provide the target entity name directly\. 2\. Keep the answer brief and precise\. 3\. Do not include lengthy explanations\./u);
+  assert.match(prompt,/EEM Numeric Format Patch:/u);
+  assert.match(prompt,/eGFR → <number> mL\/min\/1\.73m²/u);
+  assert.match(prompt,/For a non-quantitative target, follow the original EEM Answer Requirements without applying any additional entity-name normalization\.\nAnswer:$/u);
+  assert.doesNotMatch(prompt,/Query Evidence Requirement/);
+  assert.doesNotMatch(prompt,/Literal Supplement Requirement/);
+  assert.doesNotMatch(prompt,/CareHarness Task Overlay/);
+  assert.doesNotMatch(prompt,/complete canonical target entity/u);
+  assert.doesNotMatch(prompt,/multiple-choice questions/);
+});
+
+test('MedMemory MQ keeps the official appendix Answer Prompt and adds only the cardinality patch',()=>{
+  const memorySource={patient_profile:null,recent_sessions:[],historical_memory_nodes:[],memory_edges:[],query_evidence_brief:{answer_focus:[],reasoning_hypotheses:[]}},question='Q?\nA. one\nB. two';
+  const prompt=medMemoryAnswerMessages({task:'multiple_choice',question,memory_source:memorySource})[1].content;
+  assert.equal(prompt,`Context: Based on ${JSON.stringify(memorySource)}, and considering the patient’s allergy history, medical history, medications, and personal preferences, answer the following question.\nQuestion: ${question}\nAnswer Requirements:\n1. Select all correct options. 2. Output only the option letter(s), such as B or B,D. 3. Do not provide any explanation.\n${MEDMEMORY_MQ_CARDINALITY_PATCH}\nAnswer:`);
+  assert.match(prompt,/single best, most appropriate, most necessary/u);
+  assert.match(prompt,/Otherwise, treat the question as multiple-select/u);
+  assert.doesNotMatch(prompt,/Language Requirement|Query Evidence Requirement|Literal Supplement Requirement|CareHarness Task Overlay/u);
 });
 
 test('MedMemory Judge prompt remains post-answer and preserves Chinese free-text requirement',()=>{

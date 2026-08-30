@@ -3,11 +3,25 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { adapters } from '../src/adapters/index.js';
 import { Store } from '../src/db.js';
-import { ExperimentHarness,queryVisibleContext } from '../src/experiments.js';
+import { ExperimentHarness,mergeMedMemoryMqOptionContexts,parseMedMemoryMqOptions,queryVisibleContext } from '../src/experiments.js';
 import { MEDMEMORY_QUERY_METRICS,medMemoryJudgeInput,medMemoryJudgeMaxTokens,renderMedMemoryJudgePrompt,scoreMedMemoryEmptyAnswer,scoreMedMemoryJudge,validateMedMemoryJudgeOutput } from '../src/medmemory-official.js';
 import { MEDMEMORY_ANSWER_PROMPT_TEMPLATES,MEDMEMORY_CHINESE_ANSWER_REQUIREMENT,MEDMEMORY_CHINESE_JUDGE_REQUIREMENT,MEDMEMORY_SHARED_SYSTEM_PROMPT,medMemoryAnswerMessages,promptFor } from '../src/prompts.js';
 
 const A=adapters();
+
+test('MedMemory MQ parses options for independent retrieval and preserves the shared stem',()=>{
+  const parsed=parseMedMemoryMqOptions('医生，我该怎么处理？\n\nA. 方案一\nB．方案二\nC、方案三\nD: 方案四');
+  assert.equal(parsed.stem,'医生，我该怎么处理？');
+  assert.deepEqual(parsed.options,[{letter:'A',text:'方案一'},{letter:'B',text:'方案二'},{letter:'C',text:'方案三'},{letter:'D',text:'方案四'}]);
+});
+
+test('MedMemory MQ merges independently retrieved State round-robin without producing option verdicts',()=>{
+  const node=id=>({memory_id:id,text:id}),context=nodes=>({answer_ready:true,memory_nodes:nodes,memory_edges:[],semantic_evaluation:{assessment:'supported',relevant_memory_ids:nodes.map(item=>item.memory_id),covered_aspects:nodes.map(item=>item.text),answer_focus:[],connections:[],reasoning_hypotheses:[],missing_information:[]},investigation_trace:[],trace:{investigation:{turns:[]},semantic_relation_evaluator:{status:'completed',model_calls:1}}});
+  const merged=mergeMedMemoryMqOptionContexts({questionRequest:{question:'Q'},patientProfile:null,recentSessions:[],optionRuns:[{letter:'A',text:'a',context:context([node('a1'),node('shared'),node('a2')])},{letter:'B',text:'b',context:context([node('b1'),node('shared'),node('b2')])}]});
+  assert.deepEqual(merged.memory_nodes.map(item=>item.memory_id),['a1','b1','shared','a2','b2']);
+  assert.equal(merged.answer_ready,true);assert.equal(merged.mq_option_retrieval.options.length,2);
+  assert.equal('verdict' in merged.mq_option_retrieval.options[0],false);
+});
 
 test('query context rejects a node whose stored source span no longer matches its Observation',()=>{
   const observation={observation_id:'obs-query-grounding',subject_id:'p',source_type:'structured',episode_id:'session-1',turn_id:'session',event_time:'2024-01-01',raw_text:'患者只是前来复查。'},node={memory_id:'tampered',observation_id:observation.observation_id,subject_id:'p',text:'患者已确诊原文不存在的疾病。',source_text:'患者已经确诊疾病。',span:[0,9],source_type:'structured',episode_id:'session-1',turn_id:'session',event_time:'2024-01-01',certainty:1,polarity:'affirmed',families:['CS'],factor_key:'diagnosis',factor_domains:['biological'],status:'active',valid_from:'2024-01-01',version:1,version_chain:[],predecessor_memory_id:null,successor_memory_id:null,conflicts_with_memory_id:null,operation:'ADD'},context=queryVisibleContext({benchmark:'medmemorybench',item:{metadata:{visible_episode_ids:['session-1']}},data:{observations:[observation]},allMemoryNodes:[node],allMemoryEdges:[],sourceObservationById:new Map([[observation.observation_id,observation]]),stateProjection:true});
