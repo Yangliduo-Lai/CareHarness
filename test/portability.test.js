@@ -23,6 +23,7 @@ test('shared environment template is portable and contains no credential value',
   assert.match(env,/^CAREHARNESS_DB_PATH=\.\//m);
   assert.match(env,/^OPENAI_API_KEY=$/m);
   assert.match(env,/^CAREHARNESS_MATCHED_API_KEY=$/m);
+  assert.match(env,/^CAREHARNESS_RUN_KEY=$/m);
   assert.doesNotMatch(env,/^\w*(?:KEY|TOKEN|SECRET)=.+$/m);
   const ignore=readFileSync(resolve(root,'.gitignore'),'utf8');
   assert.match(ignore,/^\.env$/m);

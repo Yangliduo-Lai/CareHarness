@@ -10,6 +10,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from baseline_result_integrity import inspect_result_file
+
 
 METHODS = ("long_context", "amem", "letta")
 RESULT_RE = re.compile(r"\[([✓✗])\]\s+(\S+)\s+\([^)]*\):\s+([0-9.]+)")
@@ -43,15 +45,18 @@ def method_status(root: Path, method: str) -> dict:
         try:
             result = json.loads(newest.read_text(encoding="utf-8"))
             summary = result.get("summary", {})
-        except (OSError, json.JSONDecodeError):
+            integrity = inspect_result_file(newest)
+        except (OSError, ValueError, json.JSONDecodeError):
             summary = {}
+            integrity = {"valid": False, "failure_count": 1}
         return {
             "method": method,
-            "status": "completed",
+            "status": "completed" if integrity["valid"] else "invalid",
             "completed": summary.get("total", 395),
             "total": summary.get("total", 395),
             "persona": None,
             "latest": newest_result(method_dir),
+            "integrity": integrity,
         }
 
     checkpoint = method_dir / "checkpoints" / "medmemorybench" / f"{method}_qwen3.7-plus" / "checkpoint.json"

@@ -6,7 +6,7 @@
 
 
 > 1. 先确认本机安装了 Node.js 22.9 或更高版本，然后执行 `npm install`。
-> 2. 如果 `.env` 不存在，执行 `cp .env.example .env`；如果已经存在，不要覆盖。真实 API Key 只能保存在本地 `.env` 中，不要打印、复制到 README、写入源码或提交到 Git。需要填写的变量是 `CAREHARNESS_MATCHED_API_KEY`，其余默认配置可参考 `.env.example`。
+> 2. 如果 `.env` 不存在，执行 `cp .env.example .env`；如果已经存在，不要覆盖。真实 API Key 只能保存在本地 `.env` 中，不要打印、复制到 README、写入源码或提交到 Git。CareHarness 使用 `CAREHARNESS_MATCHED_API_KEY`；CloseAI 官方 baseline 包装器单独使用 `CAREHARNESS_RUN_KEY`。其余默认配置可参考 `.env.example`。
 > 3. 确认 MedMemoryBench 数据位于 `data/benchmarks/MedMemoryBench/data/MedMemoryBench/`。如果数据不存在，停止运行并告诉我缺少的准确路径，不要自行生成替代数据。
 > 4. 执行 `npm test`。如果测试失败，先报告失败项，不要直接改动 Benchmark 数据或评分规则。
 > 5. 执行 `npm start` 启动本地服务，并在另一个终端运行 `curl -s http://127.0.0.1:8766/api/health | jq` 检查服务状态。
@@ -32,7 +32,7 @@
 >
 > 先确认 `MEDMEMORYBENCH_REPO` 指向完整的 MedMemoryBench 官方仓库，而不只是数据目录；该目录中必须存在 `benchmarks/medmemorybench/`。使用独立的 Python 3.11 环境 `.venv-medmemory-baselines`。如果环境不存在，请读取官方仓库自己的依赖文件并安装到该环境，不要修改系统 Python，也不要自行猜测或锁定一套不同的依赖版本。
 >
-> A-Mem 和 Letta 还需要本地 `BGE-small-zh-v1.5`，默认路径为 `.cache/models/bge-small-zh-v1.5`。确认模型文件完整后再运行；Long-Context 不使用 Embedding。真实 Key 仍只从本地环境变量读取。运行前加载 `.env`，并将 `CAREHARNESS_MATCHED_API_KEY` 映射为 baseline 包装器使用的 `CAREHARNESS_RUN_KEY`，不要输出 Key。
+> A-Mem 和 Letta 还需要本地 `BGE-small-zh-v1.5`，默认路径为 `.cache/models/bge-small-zh-v1.5`。确认模型文件完整后再运行；Long-Context 不使用 Embedding。真实 Key 仍只从本地环境变量读取。运行前加载 `.env`，确认其中存在有效的 CloseAI `CAREHARNESS_RUN_KEY`，不要输出 Key，也不要把其他 Provider 的 Key 映射给 CloseAI。
 >
 > 将同一份逗号分隔的 Persona ID 写入 `BASELINE_PERSONAS`，然后依次执行下面三条命令。每一种方法都必须带 `--resume`；进程中断时从各自 checkpoint 继续，不能删除输出目录或重跑已经完成的问题。A-Mem、Letta 和 Long-Context 的结果必须保存到彼此独立的目录。
 
@@ -41,7 +41,6 @@ set -a
 source .env
 set +a
 
-export CAREHARNESS_RUN_KEY="${CAREHARNESS_MATCHED_API_KEY}"
 export MEDMEMORYBENCH_REPO="${MEDMEMORYBENCH_REPO:-$PWD/data/benchmarks/MedMemoryBench}"
 
 BASELINE_PERSONAS="<抽中的 Persona ID，使用逗号分隔>"

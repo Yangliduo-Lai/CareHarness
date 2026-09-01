@@ -23,6 +23,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import IO
 
+from baseline_result_integrity import newest_valid_result
+
 
 METHODS = ("amem", "letta")
 FATAL_LOG_MARKERS = (
@@ -49,6 +51,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--existing-root", type=Path, required=True)
     parser.add_argument("--embedding-model", type=Path, required=True)
+    parser.add_argument(
+        "--methods",
+        default=",".join(METHODS),
+        help="Comma-separated baseline methods to run (amem,letta)",
+    )
     parser.add_argument("--personas", default="3,5,7")
     parser.add_argument("--model", default="qwen3.7-plus")
     parser.add_argument("--base-url", default="https://api.openai-proxy.org/v1")
@@ -111,9 +118,13 @@ class Supervisor:
         self.stopping = False
         self.capacity_generation = 0
         self.restart_generation_cursor = 0
-        self.external_p1_stopped = {method: False for method in METHODS}
-        self.status_path = args.output_root / "supervisor-status.json"
-        self.event_log_path = args.output_root / "supervisor.log"
+        self.external_p1_stopped = {method: False for method in args.methods}
+        # Separate single-method supervisors may share one output tree. Keep
+        # their control files independent so an A-Mem run cannot overwrite a
+        # Letta resume status (or vice versa).
+        suffix = "" if tuple(args.methods) == METHODS else f"-{'-'.join(args.methods)}"
+        self.status_path = args.output_root / f"supervisor{suffix}-status.json"
+        self.event_log_path = args.output_root / f"supervisor{suffix}.log"
 
     def event(self, message: str) -> None:
         line = f"[{now()}] {message}"
@@ -212,7 +223,7 @@ class Supervisor:
             except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
                 adopted = {}
 
-        for method in METHODS:
+        for method in self.args.methods:
             for persona in personas:
                 job = self.make_job(method, persona)
                 prior = adopted.get((method, persona), {})
@@ -240,8 +251,12 @@ class Supervisor:
             return {}
 
     def result_exists(self, job: Job) -> bool:
-        result_dir = job.output_dir / f"{job.method}_{self.args.model}"
-        return any(result_dir.glob("*_result.json"))
+        valid_path, _audit = newest_valid_result(
+            job.output_dir,
+            job.method,
+            self.args.model,
+        )
+        return valid_path is not None
 
     def fatal_log_error(self, job: Job) -> str | None:
         if not job.log_path.exists():
@@ -272,7 +287,7 @@ class Supervisor:
         )
 
     def monitor_external_p1(self) -> str | None:
-        for method in METHODS:
+        for method in self.args.methods:
             if self.external_p1_stopped[method]:
                 continue
             checkpoint = (
@@ -384,7 +399,7 @@ class Supervisor:
                     os.killpg(job.pid, signal.SIGTERM)
                 except ProcessLookupError:
                     pass
-        for method in METHODS:
+        for method in self.args.methods:
             self.stop_external_p1(method)
         deadline = time.monotonic() + 20
         while time.monotonic() < deadline and any(job.alive() for job in self.jobs):
@@ -447,6 +462,11 @@ class Supervisor:
 
 def main() -> int:
     args = parse_args()
+    args.methods = tuple(dict.fromkeys(
+        value.strip().lower() for value in args.methods.split(",") if value.strip()
+    ))
+    if not args.methods or any(method not in METHODS for method in args.methods):
+        raise SystemExit("--methods must contain amem, letta, or both")
     args.repo = args.repo.resolve()
     args.runner = args.runner.resolve()
     args.output_root = args.output_root.resolve()

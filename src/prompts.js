@@ -1,7 +1,7 @@
 import { MEMORY_FAMILIES } from './schema.js';
 import { genericClinicalBridgeGrounding,normalizeHypothesisGroundingScope,patientClaimGrounding } from './claim-grounding.js';
 import { minimalLiteralSupplement,sanitizeLiteralSupplement } from './literal-supplement.js';
-export { MEDMEMORY_INVESTIGATION_STRATEGIES,MEDMEMORY_INVESTIGATION_STRATEGY_PROVENANCE,MEDMEMORY_INVESTIGATION_STRATEGY_VERSION,medMemoryInvestigationStrategy } from './medmemory-policy.js';
+export { MEDMEMORY_INVESTIGATION_STRATEGIES,MEDMEMORY_INVESTIGATION_STRATEGY_VERSION,medMemoryInvestigationStrategy } from './medmemory-policy.js';
 
 const ROUTER_TAXONOMY=JSON.stringify({families:MEMORY_FAMILIES});
 

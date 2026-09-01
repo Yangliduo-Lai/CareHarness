@@ -13,17 +13,6 @@ export const MEDMEMORY_INVESTIGATION_STRATEGY_VERSION='medmemory-investigation-s
 export const MEDMEMORY_QUERY_CLASSIFIER_VERSION='medmemory-query-classifier.v1-question-only';
 export const MEDMEMORY_QUERY_TYPES=Object.freeze(['entity_exact_match','temporal_localization','state_update','multiple_choice','inference_generation','multi_hop_clinical_deduction']);
 
-export const MEDMEMORY_INVESTIGATION_STRATEGY_PROVENANCE=Object.freeze({
-  source:'MedMemoryBench Clean offline oracle teacher',
-  persona_count:20,
-  total_question_count:1986,
-  eligible_question_count:1939,
-  teacher_read_question_gold_and_judge_metadata:true,
-  runtime_retains_case_content:false,
-  runtime_uses_public_query_type:true,
-  evaluation_note:'A score on these same 20 personas is training-set/oracle-assisted; use persona-held-out or leave-one-persona-out evaluation to measure generalization.'
-});
-
 export const MEDMEMORY_INVESTIGATION_STRATEGIES=deepFreezePolicyObject({
   entity_exact_match:{
     strategy_id:'exact_entity',answer_memory_limit:10,answer_focus_limit:1,reasoning_hypotheses:false,target_only_assessment:true,disabled_workers:['trace'],
@@ -121,7 +110,6 @@ function classification(query_type,confidence,rationale){return{query_type,confi
 function hasAny(text,terms){return terms.some(term=>text.includes(term));}
 function hasExplicitDate(text){return/(?:19|20)\d{2}[年\/.\-]\d{1,2}(?:[月\/.\-]\d{1,2}日?)?|\d{1,2}月\d{1,2}日/u.test(text);}
 
-// 由离线蒸馏脚本生成的聚合先验；不包含单题文本、答案、患者事实或 Session 标识。
 export const MEDMEMORY_BUILTIN_STUDENT_ARTIFACT=Object.freeze({
   "version": "medmemory-student-strategy-summary.v2-action-role-patterns",
   "runtime_eligible": true,

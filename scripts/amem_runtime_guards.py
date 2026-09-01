@@ -155,6 +155,7 @@ def _load_snapshot(path: Path, context_id: int, agent: Any, system: Any, note_cl
             raise AMemSnapshotError(f"duplicate A-Mem note ID in {path}: {note.id}")
         memories[note.id] = note
 
+    embedding_migrated = False
     if saved_embeddings is None:
         embeddings = None
     else:
@@ -164,6 +165,22 @@ def _load_snapshot(path: Path, context_id: int, agent: Any, system: Any, note_cl
         embeddings = np.asarray(saved_embeddings, dtype=dtype)
         if embeddings.ndim != 2 or embeddings.shape[0] != len(corpus):
             raise AMemSnapshotError(f"invalid A-Mem embedding matrix in {path}")
+        model = getattr(system.retriever, "model", None)
+        dimension_getter = getattr(model, "get_sentence_embedding_dimension", None)
+        expected_dimension = dimension_getter() if callable(dimension_getter) else None
+        if expected_dimension and embeddings.shape[1] != int(expected_dimension):
+            logger.warning(
+                "Re-embedding A-Mem snapshot context %d: saved dimension=%d, current dimension=%d",
+                context_id,
+                embeddings.shape[1],
+                int(expected_dimension),
+            )
+            embeddings = np.asarray(model.encode(corpus), dtype=dtype)
+            if embeddings.ndim != 2 or embeddings.shape != (len(corpus), int(expected_dimension)):
+                raise AMemSnapshotError(
+                    f"A-Mem snapshot re-embedding produced an invalid matrix in {path}"
+                )
+            embedding_migrated = True
 
     system.memories = memories
     system.evo_cnt = int(payload.get("evo_cnt", 0))
@@ -173,6 +190,8 @@ def _load_snapshot(path: Path, context_id: int, agent: Any, system: Any, note_cl
 
     agent._memory_chunks = [note.content for note in memories.values()]
     agent._is_initialized = bool(memories)
+    if embedding_migrated:
+        _write_snapshot(path.parent, context_id, agent, system, [str(value) for value in input_hashes])
     return [str(value) for value in input_hashes]
 
 
