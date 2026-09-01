@@ -27,7 +27,7 @@ test('Memory Graph limits DOM previews while searching all source provenance',()
 });
 
 test('policy page explains adaptive investigation without static query decomposition',()=>{
-  for(const text of ['Benchmark Investigation Policy','Patient Profile','原始问题、Patient Profile、近期原文、已选历史信息、此前 Worker 结果和剩余预算','最近 3 个完整 Patient/Doctor Session','不参与 query 排序','系统透明使用公开题型对应的证据合同','动态选择 Worker 与具体关键词、时间、语义端点'])assert.ok(js.includes(text),text);
+  for(const text of ['Benchmark Investigation Policy','Patient Profile','原始问题、Patient Profile、近期原文、已选历史信息、此前 Worker 结果和剩余预算','最近 3 个完整 Patient/Doctor Session','不参与 query 排序','独立题型分类器只读取原始问题','预测结果只决定 Investigation Policy 的证据合同与检索策略','官方题型不进入检索 Policy','最终 Answer 阶段选择对应的官方 Answer Prompt','动态选择 Worker 与具体关键词、时间、语义端点'])assert.ok(js.includes(text),text);
   for(const old of ['Query Planner 模型输出','Evidence Index Gate','evidence_need_graph','target_slot_ids'])assert.equal(js.includes(old),false,old);
 });
 
@@ -36,7 +36,7 @@ test('model settings expose Investigation Policy and no Query Planner assignment
 });
 
 test('query detail lazily loads Question Request, Investigation steps and frozen Memory context',()=>{
-  for(const text of ['Question Request（未预解析）','Investigation Policy 每一步','完整 Investigation State','investigation_trace','patient_profile','recent_sessions','historical_memory_nodes','working_memory','memory_nodes','memory_edges','/scores/'])assert.ok(js.includes(text),text);
+  for(const text of ['题型分类器（只读取原始问题）','query_classification','Question Request（未预解析）','Investigation Policy 每一步','完整 Investigation State','investigation_trace','patient_profile','recent_sessions','historical_memory_nodes','working_memory','memory_nodes','memory_edges','/scores/'])assert.ok(js.includes(text),text);
   assert.ok(js.includes('只加载当前题目的完整 trace'));
 });
 

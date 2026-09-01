@@ -21,6 +21,13 @@ test('extractor output accepts text only and code owns immutable provenance',()=
   assert.equal(nodes.length,1);assert.equal(nodes[0].memory_id,'obs-1:llm:0');assert.equal(nodes[0].episode_id,'session-17');assert.equal(nodes[0].observation_id,'obs-1');assert.equal(nodes[0].text,'患者按时服药。');
 });
 
+test('semantic polarity does not negate rhetorical confirmation or explicit adherence',()=>{
+  assert.equal(I.inferSemanticPolarity('您后来不是根据这些数据，把 CCB 改成晚上吃了嘛？'),'affirmed');
+  assert.equal(I.inferSemanticPolarity('患者每天规律按时服药，没有漏服。'),'affirmed');
+  assert.equal(I.inferSemanticPolarity('患者没有胸痛，也没有呼吸困难。'),'negated');
+  assert.equal(I.inferSemanticPolarity('患者可能没有按时服药。'),'uncertain');
+});
+
 test('malformed extracted items are dropped without dropping valid Memory Nodes',()=>{
   const observation={observation_id:'obs-2',subject_id:'p',source_type:'structured',episode_id:'session-1',turn_id:'1',event_time:null,raw_text:'患者继续监测血糖。'},nodes=I.normalizeMemoryNodeOutput({memory_nodes:[{},'患者继续监测血糖。']},observation);
   assert.equal(nodes.length,1);assert.equal(nodes[0].text,'患者继续监测血糖。');assert.equal(nodes.warnings[0].failure_reason,'missing_atomic_text');

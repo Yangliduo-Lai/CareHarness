@@ -1,7 +1,6 @@
 import { mkdirSync,writeFileSync } from 'node:fs';
 import { dirname,resolve } from 'node:path';
-import { medMemoryStrategyProfileHash,renderMedMemoryStudentPolicyArtifactModule } from '../src/medmemory-student-policy.js';
-import { MEDMEMORY_INVESTIGATION_STRATEGY_VERSION } from '../src/prompts.js';
+import { MEDMEMORY_INVESTIGATION_STRATEGY_VERSION,medMemoryStrategyProfileHash,renderMedMemoryStudentPolicyArtifactModule } from '../src/medmemory-policy.js';
 import { buildCaseFreeStudentSummary,buildLeaveOnePersonaOutSummaries,distillMedMemoryTeacher } from './lib/medmemory-teacher.mjs';
 
 const args=parseArgs(process.argv.slice(2)),strategyProfileHash=medMemoryStrategyProfileHash(),teacher=distillMedMemoryTeacher(args.data_root,{holdout_persona:args.holdout_persona}),student=buildCaseFreeStudentSummary(teacher,{strategy_version:MEDMEMORY_INVESTIGATION_STRATEGY_VERSION,strategy_profile_hash:strategyProfileHash}),output=resolve(args.output),teacherOutput=resolve(args.teacher_output);

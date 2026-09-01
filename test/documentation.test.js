@@ -20,14 +20,18 @@ test('README is the only documentation entry',()=>{
 
 test('README contains only the required run instructions',()=>{
   for(const text of [
-    'Node.js 22.9','npm start','模型与 Provider',
-    'npm run medmemory:persona1','--prepare-snapshots'
+    '直接交给 Codex','Node.js 22.9','npm start','/api/models/profiles',
+    'npm run medmemory:matched','--prepare-snapshots','无放回抽样','固定随机种子 42',
+    'qwen3.7-plus','格式容错调整分','硬编码的确定性格式规范化',
+    'Long-Context','A-Mem','Letta','run-official-medmemory-baseline.py','--resume'
   ])assert.ok(readme.includes(text),text);
+  for(const text of ['前端','浏览器','CPCD','Psy-Chronicle'])assert.equal(readme.includes(text),false,text);
 });
 
-test('README says exactly where frontend and CLI results are shown',()=>{
+test('README says exactly where CLI results are shown',()=>{
   for(const text of [
-    'Experiments','Memory Graph','reports/medmemory-careharness-results.json','同名 `.md`','错题 JSON'
+    '/api/experiments/summaries','/wrong-answers/export','/api/memory-graphs',
+    'reports/medmemory-careharness-results.json','错题 JSON'
   ])assert.ok(readme.includes(text),text);
 });
 

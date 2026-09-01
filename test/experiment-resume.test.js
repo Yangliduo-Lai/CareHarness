@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { Store } from '../src/db.js';
 import { ExperimentHarness,memoryScopeKey } from '../src/experiments.js';
 import { ModelRegistry } from '../src/model-registry.js';
-import { checkpointSourceCompatible,memoryResumeStart,queryResumePlan } from '../src/experiment-resume.js';
+import { checkpointSourceCompatible,explicitDiagnosticResumePlan,memoryResumeStart,queryResumePlan } from '../src/experiment-resume.js';
 
 test('memory resume starts after the last compatible contiguous Session',()=>{
   const current={memory_pipeline_version:'unified-memory-graph-v17-semantic-source-anchors',memory_scope_key:'scope-a',complete_through_session:40,status:'incomplete',observation_failed:59};
@@ -32,6 +32,16 @@ test('query resume reuses only complete infrastructure-valid results from the ex
   assert.deepEqual(plan.reusable_scores.map(item=>item.score_id),['q1']);
   assert.deepEqual(plan.pending_cases.map(item=>item.score_id),['q2','q3']);
   assert.deepEqual(plan.source_experiment_ids,['latest']);
+});
+
+test('explicit diagnostic resume reuses only valid scores from the identical graph and model configuration',()=>{
+  const model={provider:'openai',base_url:'https://example.test/v1',model:'qwen3.5-flash',temperature:0,max_tokens:1200},models={global:model,investigation_policy:model,judge:model,scoring_judge:model},config={persona_id:7,noise:false,evaluation_mode:'persona7',memory_pipeline_version:'graph-v1',memory_scope_key:'scope-7',resolved_models:models},cases=[{score_id:'q1'},{score_id:'q2'},{score_id:'q3'}],valid={kind:'score',status:'scored',score:1,is_correct:true,memory_incomplete:false,judge_infrastructure_failure:false};
+  const source={id:'source',benchmark:'medmemorybench',config:{...config,score_only_current_memory:true,current_memory_snapshot:{fingerprint:'graph-7'}},results:[{...valid,score_id:'q1'},{...valid,score_id:'q2',status:'failed',score:null,is_correct:null},{...valid,score_id:'q3',judge_infrastructure_failure:true}]};
+  const plan=explicitDiagnosticResumePlan(source,{benchmark:'medmemorybench',config,cases,memorySnapshot:{fingerprint:'graph-7'}});
+  assert.deepEqual(plan.reusable_scores.map(item=>item.score_id),['q1']);
+  assert.deepEqual(plan.pending_cases.map(item=>item.score_id),['q2','q3']);
+  assert.throws(()=>explicitDiagnosticResumePlan(source,{benchmark:'medmemorybench',config:{...config,resolved_models:{...models,judge:{...model,model:'different'}}},cases,memorySnapshot:{fingerprint:'graph-7'}}),/different Answer, Policy, or Judge models/);
+  assert.throws(()=>explicitDiagnosticResumePlan(source,{benchmark:'medmemorybench',config,cases,memorySnapshot:{fingerprint:'other'}}),/different Memory Graph snapshot/);
 });
 
 test('answer-frozen query checkpoints persist locally until the Judge succeeds',()=>{

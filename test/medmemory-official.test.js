@@ -23,6 +23,13 @@ test('MedMemory MQ merges independently retrieved State round-robin without prod
   assert.equal('verdict' in merged.mq_option_retrieval.options[0],false);
 });
 
+test('MedMemory MQ canonicalizes letters-only compact output without mining prose',()=>{
+  const item={task:'multiple_choice'};
+  assert.equal(A.medmemorybench.normalizeAnswer('AB',item),'A,B');
+  assert.equal(A.medmemorybench.normalizeAnswer('B， A',item),'A,B');
+  assert.equal(A.medmemorybench.normalizeAnswer('答案是 A 和 B',item),'答案是 A 和 B');
+});
+
 test('query context rejects a node whose stored source span no longer matches its Observation',()=>{
   const observation={observation_id:'obs-query-grounding',subject_id:'p',source_type:'structured',episode_id:'session-1',turn_id:'session',event_time:'2024-01-01',raw_text:'患者只是前来复查。'},node={memory_id:'tampered',observation_id:observation.observation_id,subject_id:'p',text:'患者已确诊原文不存在的疾病。',source_text:'患者已经确诊疾病。',span:[0,9],source_type:'structured',episode_id:'session-1',turn_id:'session',event_time:'2024-01-01',certainty:1,polarity:'affirmed',families:['CS'],factor_key:'diagnosis',factor_domains:['biological'],status:'active',valid_from:'2024-01-01',version:1,version_chain:[],predecessor_memory_id:null,successor_memory_id:null,conflicts_with_memory_id:null,operation:'ADD'},context=queryVisibleContext({benchmark:'medmemorybench',item:{metadata:{visible_episode_ids:['session-1']}},data:{observations:[observation]},allMemoryNodes:[node],allMemoryEdges:[],sourceObservationById:new Map([[observation.observation_id,observation]]),stateProjection:true});
   assert.deepEqual(context.memory_nodes,[]);assert.equal(context.source_grounding_policy.observation_verified_memory_node_count,1);assert.equal(context.source_grounding_policy.quarantined_memory_node_count,1);assert.equal(context.source_grounding_policy.reason_counts.source_span_text_mismatch,1);

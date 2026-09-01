@@ -129,10 +129,13 @@ function prepareDiscoveryInstruction(questionRequest,instruction,pool,currentNod
     for(const family of families)if(!known.has(family))weights.push({family,weight:2});
     clean.family_weights=weights;delete clean.required_families;delete clean.family_match;
   }
-  relaxImpossibleRequiredTerms(clean,pool);
   clean.temporal=temporalGate?temporalInstructionForGate(temporalGate):groundTemporalInstruction(questionText(questionRequest),clean.temporal,pool,currentNodes);
   if(!Object.keys(clean.temporal).length)delete clean.temporal;
   if(temporalGate)relaxConflictingGateScope(clean,pool,temporalGate);else relaxConflictingExactScope(clean,pool);
+  // Required literal terms must be feasible inside the effective calendar
+  // scope, not merely somewhere else in the patient's full graph. Otherwise a
+  // later similarly worded note can make an exact-date search impossible.
+  relaxImpossibleRequiredTerms(clean,temporalScopedPool(pool,clean.temporal));
   return clean;
 }
 
@@ -191,6 +194,11 @@ function relaxImpossibleRequiredTerms(instruction,pool){
   delete instruction.required_terms;
   instruction.term_match='any';
 }
+function temporalScopedPool(pool,temporal={}){
+  const exact=new Set(resolvedExactDates(temporal)),months=new Set(array(temporal?.month_keys).map(value=>String(value).slice(0,7)).filter(value=>/^20\d{2}-(?:0[1-9]|1[0-2])$/u.test(value))),start=canonicalDate(temporal?.start_date),end=canonicalDate(temporal?.end_date);
+  if(!exact.size&&!months.size&&!start&&!end)return array(pool);
+  return array(pool).filter(node=>{const date=canonicalDate(node?.event_time),month=date.slice(0,7);if(exact.size&&!exact.has(date))return false;if(months.size&&!months.has(month))return false;if(start&&(!date||date<start))return false;if(end&&(!date||date>end))return false;return true;});
+}
 function relaxConflictingExactScope(instruction,pool){
   const temporal=instruction.temporal||{},dates=resolvedExactDates(temporal);
   if(String(temporal.operator||'')!=='exact'||!dates.length)return;
@@ -219,18 +227,29 @@ function groundTemporalInstruction(question,temporalValue,pool,currentNodes){
   // The LLM policy owns semantic operators such as latest/current/earliest.
   // Deterministic grounding may override them only for an unambiguous calendar
   // expression in the question, never for a decimal clinical measurement.
-  if(!questionDates.length&&questionMonths.length)return{operator:'range',month_keys:questionMonths};
-  const suppliedDates=[...array(temporal.date_keys).map(canonicalDate),canonicalDate(temporal.base_date),canonicalDate(temporal.start_date),canonicalDate(temporal.end_date)].filter(Boolean),grounded=suppliedDates.every(date=>questionDates.includes(date)||currentDates.has(date));
+  // A question can name a dated baseline and then ask for a different month
+  // without repeating its year (for example, "2023 年 12 月底……1 月"). In
+  // that case a policy range for the explicitly named target month is grounded;
+  // do not replace it with the baseline month merely because only the baseline
+  // has a four-digit year. The month marker is required, so measurements such
+  // as 66.5 kg cannot authorize a calendar constraint.
+  const suppliedDates=[...array(temporal.date_keys).map(canonicalDate),canonicalDate(temporal.base_date),canonicalDate(temporal.start_date),canonicalDate(temporal.end_date)].filter(Boolean),suppliedMonths=new Set(suppliedDates.map(date=>date.slice(0,7))),yearlessMonthNumbers=explicitYearlessMonthNumbers(question),grounded=suppliedDates.every(date=>questionDates.includes(date)||currentDates.has(date)||yearlessMonthNumbers.has(Number(date.slice(5,7))));
+  // A year-month expression denotes the whole month. Do not let a policy turn
+  // it into an invented exact first day merely because the month number agrees.
+  if(!questionDates.length&&questionMonths.length&&suppliedMonths.size&&[...suppliedMonths].every(month=>questionMonths.includes(month)))return{operator:'range',month_keys:questionMonths};
+  if(suppliedDates.length&&grounded)return temporal;
+  if(!suppliedDates.length&&!questionDates.length&&questionMonths.length)return{operator:'range',month_keys:questionMonths};
   if(suppliedDates.length&&!grounded){
-    const lookback=relativeLookbackDays(question),anchor=latestDate(pool);
-    if(lookback&&anchor){const start=new Date(`${anchor}T00:00:00.000Z`);start.setUTCDate(start.getUTCDate()-(lookback-1));return{operator:'range',start_date:start.toISOString().slice(0,10),end_date:anchor};}
+    if(!questionDates.length&&questionMonths.length)return{operator:'range',month_keys:questionMonths};
+    // A vague phrase such as "recent two days" is not an executable calendar
+    // boundary. Never repair an invented Policy range by anchoring it to the
+    // newest graph record; keep the phrase semantic and searchable instead.
     return{};
   }
-  if(String(temporal.operator||'')==='range'&&!suppliedDates.length){
-    const lookback=relativeLookbackDays(question),anchor=latestDate(pool);
-    if(lookback&&anchor){const start=new Date(`${anchor}T00:00:00.000Z`);start.setUTCDate(start.getUTCDate()-(lookback-1));return{operator:'range',start_date:start.toISOString().slice(0,10),end_date:anchor};}
-  }
   return temporal;
+}
+function explicitYearlessMonthNumbers(value){
+  const text=String(value||'').normalize('NFKC'),out=new Set();for(const match of text.matchAll(/(?<!\d)(\d{1,2})\s*月/gu)){const prefix=text.slice(Math.max(0,match.index-10),match.index);if(/(?:20\d{2}|\d{2})\s*年\s*$/u.test(prefix))continue;const month=Number(match[1]);if(month>=1&&month<=12)out.add(month);}return out;
 }
 function boundedAnswerNodes(snapshot,limit,preferredNodes=[]){
   const nodes=array(snapshot.memory_nodes),byId=new Map(nodes.map(node=>[String(node?.memory_id||''),node])),assessment=snapshot.assessment||snapshot.answer_brief||{},priority=assessmentMemoryIds(assessment),preferred=array(preferredNodes).map(node=>String(node?.memory_id||'')),out=[],seen=new Set(),add=id=>{const key=String(id||'');if(key&&!seen.has(key)&&byId.has(key)&&out.length<limit){seen.add(key);out.push(byId.get(key));}};
@@ -269,9 +288,6 @@ function questionText(value){return String(value?.question||value||'').normalize
 function relativeDateOffset(value){const text=String(value||'').normalize('NFKC');if(/(?:大前天|三天前)/u.test(text))return-3;if(/(?:大后天|三天后)/u.test(text))return 3;if(/(?:前天|两天前)/u.test(text))return-2;if(/(?:后天|两天后)/u.test(text))return 2;if(/(?:前一日|前一天|上一日|前日|previous day)/iu.test(text))return-1;if(/(?:次日|翌日|第二天|后一天|下一日|next day)/iu.test(text))return 1;return null;}
 function asksForLatestStatus(value){return/(?:当前|目前|现在|如今|现今|现阶段|眼下|时下|最新|最近一次|至今|current(?:ly)?|now|today|latest|most\s+recent|at\s+present|since\s+then)/iu.test(String(value||'').normalize('NFKC'));}
 function hasExplicitDateRangeSyntax(value){return/(?:\d(?:日)?\s*(?:至|到)\s*20\d{2}|之间|期间|\bfrom\b[\s\S]*\bto\b|\bbetween\b[\s\S]*\band\b)/iu.test(String(value||'').normalize('NFKC'));}
-function relativeLookbackDays(value){const text=String(value||''),arabic=/(\d+)\s*(周|天)/u.exec(text);if(arabic)return Math.max(1,Math.min(90,Number(arabic[1])*(arabic[2]==='周'?7:1)));const chinese=/([一二两三四五六七八九十]+)\s*(周|天)/u.exec(text);if(chinese){const number=chineseNumber(chinese[1]);return Math.max(1,Math.min(90,number*(chinese[2]==='周'?7:1)));}return/(?:这几天|近几天)/u.test(text)?7:null;}
-function chineseNumber(value){const digit=character=>({一:1,二:2,两:2,三:3,四:4,五:5,六:6,七:7,八:8,九:9}[character]||0);if(value==='十')return 10;if(value.startsWith('十'))return 10+digit(value[1]);if(value.includes('十')){const[a,b='']=value.split('十');return digit(a)*10+digit(b);}return Math.max(1,digit(value));}
-function latestDate(nodes){return array(nodes).map(node=>canonicalDate(node?.event_time)).filter(Boolean).sort().at(-1)||'';}
 function canonicalDate(value){const raw=String(value||'').trim(),match=/^(?<year>20\d{2})[-/.](?<month>\d{1,2})[-/.](?<day>\d{1,2})(?:$|T)/u.exec(raw);if(match){const year=Number(match.groups.year),month=Number(match.groups.month),day=Number(match.groups.day),date=new Date(Date.UTC(year,month-1,day));return date.getUTCFullYear()===year&&date.getUTCMonth()===month-1&&date.getUTCDate()===day?date.toISOString().slice(0,10):'';}return'';}
 function addDays(value,days){const date=new Date(`${value}T00:00:00.000Z`);date.setUTCDate(date.getUTCDate()+Number(days||0));return date.toISOString().slice(0,10);}
 function mergeById(left,right,key){const out=[],seen=new Set();for(const item of[...array(left),...array(right)]){const id=String(item?.[key]||'');if(!id||seen.has(id))continue;seen.add(id);out.push(item);}return out;}

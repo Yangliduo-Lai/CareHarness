@@ -230,7 +230,18 @@ function sameStoppedMedication(text,drug){
   return entity.length>1&&value.includes(entity)&&/(?:停用|停药|停止服用|不再服用|stoppedtaking|discontinued)/iu.test(String(text));
 }
 
-function inferSemanticPolarity(text){const value=String(text||'');if(/(?:可能|也许|似乎|不确定|怀疑|考虑|倾向|大概|probably|possibly|uncertain|suspect)/iu.test(value))return'uncertain';if(/(?:没有|并无|尚无|未见|否认|不再|没再|无明显|无任何|不是|从未|not|no\s|without|denies|never)/iu.test(value))return'negated';return'affirmed';}
+function inferSemanticPolarity(text){
+  const value=String(text||'');
+  if(/(?:可能|也许|似乎|不确定|怀疑|考虑|倾向|大概|probably|possibly|uncertain|suspect)/iu.test(value))return'uncertain';
+  // Confirmation-style rhetorical questions and affirmative adherence claims
+  // must not make the whole Memory Node negative merely because their surface
+  // form contains "不是" or "没有".
+  const proposition=value
+    .replace(/不是([^。！？!?；;\n]{1,160}?)(?:嘛|吗)[？?]?/gu,'$1')
+    .replace(/((?:按时|规律|固定|一直|每天|继续)[^。！？!?；;\n]{0,100}?)(?:没有|没)(?:漏服|漏药|漏吃|漏掉|中断)/gu,'$1');
+  if(/(?:没有|并无|尚无|未见|否认|不再|没再|无明显|无任何|不是|从未|not|no\s|without|denies|never)/iu.test(proposition))return'negated';
+  return'affirmed';
+}
 
 function normalizeAndValidateMemoryNodes(value,observation){
   const normalized=normalizeMemoryNodeOutput(value,observation);
@@ -531,4 +542,4 @@ function diff(a,b){const aa=JSON.stringify(a)??'null',bb=JSON.stringify(b)??'nul
 function readMemoryGraphSnapshot(store,subjectId){for(let attempt=0;attempt<3;attempt++){const before=store.memoryGraphRevisionFor(subjectId),nodes=store.memoryNodesFor(subjectId),edges=store.memoryEdgesFor(subjectId),after=store.memoryGraphRevisionFor(subjectId);if(before===after)return{revision:after,nodes,edges};}throw new Error(`Memory Graph for ${subjectId} changed repeatedly while being read; retry the observation`);}
 function memoryCommitFailure(error){return{kind:/changed concurrently/i.test(String(error?.message||''))?'graph_revision_conflict':'memory_commit_error',message:String(error?.message||error),suggestion:/changed concurrently/i.test(String(error?.message||''))?'Retry this observation so graph versioning is recomputed from the latest patient revision.':'The Memory Graph transaction rolled back. Inspect Memory Node, Memory Edge, provenance and database constraints before retrying; no successful commit is claimed.'};}
 
-export const pipelineInternals={extractMemoryNodes,buildSemanticContextUnits,semanticExtractorInput,bindSemanticSupport,normalizeMemoryNodeOutput,normalizeMemoryTagsOutput,materializeEmptyMemoryTags,validateMemoryTags,locateContiguousQuote,tagMemoryNodes,tagMemoryWithFallback,updateMemoryGraph,currentMemory,actionPolicy,generateFromMemory,audit,augmentExtractorCoverage,coverageLedgerCandidates,quarantineUnalignedMemoryNodes,memoryTopicKey};
+export const pipelineInternals={extractMemoryNodes,buildSemanticContextUnits,semanticExtractorInput,bindSemanticSupport,normalizeMemoryNodeOutput,normalizeMemoryTagsOutput,materializeEmptyMemoryTags,validateMemoryTags,locateContiguousQuote,tagMemoryNodes,tagMemoryWithFallback,updateMemoryGraph,currentMemory,actionPolicy,generateFromMemory,audit,augmentExtractorCoverage,coverageLedgerCandidates,quarantineUnalignedMemoryNodes,memoryTopicKey,inferSemanticPolarity};

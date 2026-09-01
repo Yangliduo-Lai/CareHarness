@@ -28,6 +28,12 @@ test('MedMemory can select one exact query_id before any model payload is built'
   assert.throws(()=>A.medmemorybench.load({persona_id:1,start_session:60,max_session:60,query_id:'missing-query'}),/does not contain query_id/);
 });
 
+test('MedMemory can select an explicit query_id subset for routing diagnostics',()=>{
+  const queryIds=['session_10_eem_1','session_10_mq_1'],data=A.medmemorybench.load({persona_id:1,max_session:10,query_ids:queryIds}),cases=A.medmemorybench.cases(data);
+  assert.deepEqual(cases.map(item=>item.score_id),queryIds);assert.deepEqual(data.query_selection.query_ids,queryIds);
+  assert.throws(()=>A.medmemorybench.load({persona_id:1,max_session:10,query_ids:['session_10_eem_1','missing-query']}),/does not contain query_id/);
+});
+
 test('MedMemory keeps Clean and Noise in different graph subjects',()=>{
   const clean=A.medmemorybench.load({persona_id:1,max_session:1,noise:false}),noise=A.medmemorybench.load({persona_id:1,max_session:1,noise:true});
   assert.notEqual(clean.subject_id,noise.subject_id);assert.equal(clean.memory_namespace,'clean');assert.equal(noise.memory_namespace,'with-noise');

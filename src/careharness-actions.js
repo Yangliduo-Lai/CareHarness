@@ -3,8 +3,9 @@ import { genericClinicalBridgeGrounding,normalizeHypothesisGroundingScope,patien
 import { minimalLiteralSupplement } from './literal-supplement.js';
 import { INVESTIGATION_DOCUMENTATION_DATE_SEMANTICS,INVESTIGATION_UNGROUNDED_CLAIM_GAP,investigationAssessmentModelContract,investigationTemporalTargetModelContext } from './prompts.js';
 import { retrieveMemoryCandidates,retrieveSessionMemoryAnchors } from './retrieval.js';
+import { INVESTIGATION_WORKER_SET_VERSION } from './medmemory-policy.js';
 
-export const INVESTIGATION_WORKER_SET_VERSION='careharness-investigation-workers.v5-source-separated-relations';
+export { INVESTIGATION_WORKER_SET_VERSION } from './medmemory-policy.js';
 export const INVESTIGATION_WORKERS=Object.freeze(['search','context','trace','assess','refine','verify','answer']);
 
 export function searchMemory(request,memoryNodes,memoryEdges,instruction,options={}){return retrieveMemoryCandidates({question_request:createQuestionRequest(request),instruction},memoryNodes,{memory_edges:memoryEdges,limit:options.limit,semantic_scores:options.semantic_scores,semantic_top_k:options.semantic_top_k});}

@@ -47,6 +47,19 @@ test('abbreviated Chinese year-month keeps state discovery inside the requested 
   assert.deepEqual(result.snapshot.memory_nodes.map(node=>node.memory_id),['march']);
 });
 
+test('an explicitly requested yearless month is not overwritten by a dated baseline month',async()=>{
+  const base={observation_id:'o',subject_id:'p',source_type:'patient',turn_id:'1',certainty:1,polarity:'affirmed',families:['LO'],status:'active',version:1},december={...base,memory_id:'december',episode_id:'session-1',text:'患者十二月底血压为135/82 mmHg。',event_time:'2023-12-29'},january={...base,memory_id:'january',observation_id:'o-january',episode_id:'session-6',text:'患者随访血压约128/76 mmHg。',event_time:'2024-01-18'},workers=createMemoryInvestigationWorkers({question_request:{query_type:'state_update',question:'患者在2023年12月底测得血压为135/82 mmHg，请问他1月记录的血压是多少？'},memory_nodes:[december,january],memory_edges:[],candidate_budget:8}),result=await workers.search.run({state:{snapshot:{memory_nodes:[],memory_edges:[],patient_profile:null,recent_sessions:[]}},instruction:{search_terms:['血压'],temporal:{operator:'range',start_date:'2024-01-01',end_date:'2024-01-31',prefer:'earliest'}}});
+  assert.deepEqual(result.trace.effective_instruction.temporal,{operator:'range',start_date:'2024-01-01',end_date:'2024-01-31',prefer:'earliest'});
+  assert.deepEqual(result.snapshot.memory_nodes.map(node=>node.memory_id),['january']);
+});
+
+test('required terms are relaxed when impossible inside an exact-date scope',async()=>{
+  const base={observation_id:'o',subject_id:'p',source_type:'patient',turn_id:'1',certainty:1,polarity:'affirmed',families:['PE'],status:'active',version:1},target={...base,memory_id:'target',episode_id:'session-74',text:'“没开机”状态持续四十分钟到一小时。',event_time:'2024-09-03'},later={...base,memory_id:'later',observation_id:'o-later',episode_id:'session-81',text:'晨起恢复时间约十分钟。',event_time:'2024-10-01'},workers=createMemoryInvestigationWorkers({question_request:{query_type:'state_update',question:'患者2024-09-03晨起恢复时间如何变化？'},memory_nodes:[target,later],memory_edges:[],candidate_budget:8}),result=await workers.search.run({state:{snapshot:{memory_nodes:[],memory_edges:[],patient_profile:null,recent_sessions:[]}},instruction:{search_terms:['没开机','分钟'],required_terms:['恢复','时间','分钟'],temporal:{operator:'exact',date_keys:['2024-09-03']}}});
+  assert.equal(result.trace.effective_instruction.required_terms,undefined);
+  assert.equal(result.trace.effective_instruction.term_match,'any');
+  assert.deepEqual(result.snapshot.memory_nodes.map(node=>node.memory_id),['target']);
+});
+
 test('question temporal gate distinguishes historical baselines, exact events, ranges, and relative days',()=>{
   assert.equal(deriveQuestionTemporalGate({query_type:'state_update',question:'设备在2023-02-04记录过一个基线值，目前的读数是多少？'}),null);
   assert.equal(deriveQuestionTemporalGate({question:'设备在2023-02-04记录过一个基线值，至今读数如何？'}),null);

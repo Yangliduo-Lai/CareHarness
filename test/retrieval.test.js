@@ -188,6 +188,12 @@ test('overlapping lexical fragments contribute their average and a decimal also 
   assert.ok(result.candidates[1].score<4,'overlapping phrase fragments must not be summed independently');
 });
 
+test('policy objective numeric literals remain soft anchors beside broad search terms',()=>{
+  const transition=node('transition','患者近两日晨起体重由66.5kg上升至约68.5kg。',{event_time:'2024-03-14'}),continuation=node('continuation','患者晨起体重维持在67kg左右。',{event_time:'2024-04-02'}),result=retrieveMemoryCandidates({question_request:createQuestionRequest('Q'),instruction:{objective:'Find the updated weight by comparing it with the stated 66.5kg baseline.',search_terms:['体重','kg'],temporal:{operator:'latest'}}},[transition,continuation],{limit:2});
+  assert.equal(result.memory_nodes[0].memory_id,'transition');
+  assert.deepEqual(result.candidates[0].numeric_matches,['66.5']);
+});
+
 test('earliest temporal operation ranks semantic relevance before choosing an event date',()=>{
   const generic=node('generic','医生建议以后可检查胰岛自身抗体。',{event_time:'2024-01-06'}),target=node('target','患者GADA抗体强阳性，滴度>2000 U/mL。',{event_time:'2024-03-23'});
   const result=retrieveMemoryCandidates({question_request:createQuestionRequest('Q'),instruction:{search_terms:['GADA','强阳性','>2000'],expansion_terms:['胰岛自身抗体'],temporal:{operator:'earliest',prefer:'earliest'}}},[generic,target],{limit:4});
@@ -226,15 +232,15 @@ test('global discovery treats a guessed family as a preference instead of deleti
   assert.equal(result.trace.worker_instruction.required_families,undefined);
 });
 
-test('discovery grounds month and relative ranges instead of trusting invented calendar dates',()=>{
+test('discovery grounds explicit months but keeps vague relative periods soft',()=>{
   const nodes=[node('march','患者尿酮体检测结果为++。',{event_time:'2024-03-20'}),node('april','患者尿酮体检测转阴。',{event_time:'2024-04-01'}),node('recent','患者两周内记录目标症状。',{event_time:'2024-03-14'}),node('old','患者更早记录目标症状。',{event_time:'2024-01-01'})];
   const monthWorkers=createMemoryInvestigationWorkers({question_request:createQuestionRequest('患者2024年3月尿酮检测的结果是什么？'),memory_nodes:nodes}),month=monthWorkers.search.run({state:{snapshot:{memory_nodes:[],memory_edges:[]}},instruction:{search_terms:['尿酮'],temporal:{operator:'exact',date_keys:['2024-03-01']}}});
   assert.equal(month.snapshot.memory_nodes[0].memory_id,'march');
   assert.equal(month.snapshot.memory_nodes.some(item=>item.memory_id==='april'),false);
   assert.deepEqual(month.trace.resolved_temporal.month_keys,['2024-03']);
   const rangeNodes=nodes.filter(item=>['recent','old'].includes(item.memory_id)),rangeWorkers=createMemoryInvestigationWorkers({question_request:createQuestionRequest('这两周出现过目标症状吗？'),memory_nodes:rangeNodes}),range=rangeWorkers.search.run({state:{snapshot:{memory_nodes:[],memory_edges:[]}},instruction:{search_terms:['目标症状'],temporal:{operator:'range',start_date:'2023-10-01',end_date:'2023-10-15'}}});
-  assert.deepEqual(range.snapshot.memory_nodes.map(item=>item.memory_id),['recent']);
-  assert.deepEqual(range.trace.resolved_temporal,{operator:'range',date_keys:[],month_keys:[],start_date:'2024-03-01',end_date:'2024-03-14'});
+  assert.deepEqual(new Set(range.snapshot.memory_nodes.map(item=>item.memory_id)),new Set(['recent','old']));
+  assert.deepEqual(range.trace.resolved_temporal,{operator:'none',date_keys:[],month_keys:[],start_date:null,end_date:null});
 });
 
 test('a month-only date key is searched as the whole month instead of its first day',()=>{

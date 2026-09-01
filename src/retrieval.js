@@ -16,7 +16,7 @@ export function createMemoryRetrievalRequest(questionRequest,instruction={}){
 export function retrieveMemoryCandidates(request,memoryNodes=[],options={}){
   const retrieval=createMemoryRetrievalRequest(request?.question_request||request?.request||request?.question||request,request?.instruction),spec=interpretInstruction(retrieval.instruction),nodes=dedupeNodes(memoryNodes),edges=array(options.memory_edges),limit=Math.min(positiveInteger(options.limit)||defaultLimit(spec),spec.max_results||Infinity),terms=searchTerms(spec),semanticScores=normalizeSemanticScores(options.semantic_scores),semanticTopK=Math.max(0,positiveInteger(options.semantic_top_k)||0),byId=new Map(nodes.map(node=>[String(node.memory_id||''),node])),allSemanticRanked=[...semanticScores.entries()].filter(([id,score])=>{const node=byId.get(id);if(!node||!Number.isFinite(score))return false;const text=normalize([node.text,node.source_text].filter(Boolean).join(' ')),matched=terms.filter(term=>text.includes(normalize(term)));return matchesConstraints(node,text,matched,terms,spec,true);}).sort((left,right)=>right[1]-left[1]||left[0].localeCompare(right[0])),semanticRanked=allSemanticRanked.slice(0,semanticTopK),semanticTopIds=new Set(semanticRanked.map(([id])=>id)),semanticRanks=new Map(allSemanticRanked.map(([id],index)=>[id,index+1])),exactTemporalSemantic=spec.has_exact_temporal_scope&&allSemanticRanked.length>0,records=[];
   for(const node of nodes){
-    const id=String(node.memory_id||''),text=normalize([node.text,node.source_text].filter(Boolean).join(' ')),matched=terms.filter(term=>text.includes(normalize(term))),numbers=numberSet(text),semanticScore=semanticScores.get(id),semanticRank=semanticRanks.get(id),semanticEligible=exactTemporalSemantic?Number.isFinite(semanticScore):semanticTopIds.has(id),reasons=[];
+    const id=String(node.memory_id||''),rawText=[node.text,node.source_text].filter(Boolean).join(' '),text=normalize(rawText),matched=terms.filter(term=>text.includes(normalize(term))),numbers=numberSet(rawText),semanticScore=semanticScores.get(id),semanticRank=semanticRanks.get(id),semanticEligible=exactTemporalSemantic?Number.isFinite(semanticScore):semanticTopIds.has(id),reasons=[];
     if(!matchesConstraints(node,text,matched,terms,spec,semanticEligible))continue;
     let score=spec.has_hard_constraints?1:0;
     if(spec.has_hard_constraints)reasons.push('instruction_constraint');
@@ -50,7 +50,7 @@ export function retrieveMemoryCandidates(request,memoryNodes=[],options={}){
     memory_nodes:ranked.map(entry=>entry.node),
     memory_edges:selectedEdges,
     candidates:ranked.map(candidateTrace),
-    trace:{version:'careharness-memory-retrieval.worker-v8-soft-relative-time',memory_pool_size:nodes.length,candidate_count:records.length,near_duplicate_candidate_count:diversity.deferred.length,distinct_fact_candidate_count:diversity.primary.length,selected_memory_count:ranked.length,selected_edge_count:selectedEdges.length,selection_mode:exactTemporalSemantic?'exact_temporal_embedding_top_k':semanticRanked.length?'policy_instruction_hybrid_lexical_embedding':'policy_instruction_only',lexical_filter_mode:spec.has_exact_scope?'rank_within_exact_scope':semanticRanked.length?'filter_by_terms_or_embedding_top_k':'filter_by_terms',ranking_primary:exactTemporalSemantic?'embedding_similarity':'composite_score',embedding_candidate_count:semanticRanked.length,embedding_scored_scope_count:allSemanticRanked.length,resolved_temporal:spec.resolved_temporal,zero_recall:ranked.length===0,worker_instruction:retrieval.instruction,ranked:ranked.map(candidateTrace)},
+    trace:{version:'careharness-memory-retrieval.worker-v9-objective-literal-anchors',memory_pool_size:nodes.length,candidate_count:records.length,near_duplicate_candidate_count:diversity.deferred.length,distinct_fact_candidate_count:diversity.primary.length,selected_memory_count:ranked.length,selected_edge_count:selectedEdges.length,selection_mode:exactTemporalSemantic?'exact_temporal_embedding_top_k':semanticRanked.length?'policy_instruction_hybrid_lexical_embedding':'policy_instruction_only',lexical_filter_mode:spec.has_exact_scope?'rank_within_exact_scope':semanticRanked.length?'filter_by_terms_or_embedding_top_k':'filter_by_terms',ranking_primary:exactTemporalSemantic?'embedding_similarity':'composite_score',embedding_candidate_count:semanticRanked.length,embedding_scored_scope_count:allSemanticRanked.length,resolved_temporal:spec.resolved_temporal,zero_recall:ranked.length===0,worker_instruction:retrieval.instruction,ranked:ranked.map(candidateTrace)},
   };
 }
 
@@ -94,7 +94,11 @@ function interpretInstruction(instruction){
     start_date:canonicalDate(temporal.start_date),
     end_date:canonicalDate(temporal.end_date),
     resolved_temporal:{operator:String(temporal.operator||'none').toLowerCase(),date_keys:[...dateKeys],month_keys:[...monthKeys],start_date:canonicalDate(temporal.start_date)||null,end_date:canonicalDate(temporal.end_date)||null,...(temporalPreference?{prefer:temporalPreference}:{})},
-    numeric_signals:new Set(unique(instruction.numeric_signals).map(value=>String(Number(value))).filter(value=>value!=='NaN')),
+    // The Action Policy's objective is part of its executable direction. Keep
+    // numeric literals copied into that objective as soft ranking anchors even
+    // when broad explicit search terms are also present; otherwise a baseline
+    // value named by the Policy is silently ignored by the worker.
+    numeric_signals:new Set([...unique(instruction.numeric_signals).map(value=>String(Number(value))).filter(value=>value!=='NaN'),...numberSet(instruction.objective)]),
     lenses:normalizeLenses(instruction.lenses),
     expand_graph:instruction.expand_graph===true||relation.expand_graph===true,
     max_results:positiveInteger(instruction.max_results),

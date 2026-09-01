@@ -1,8 +1,8 @@
 import { MATCHED_EVALUATION_MODE } from './careharness-contract.js';
 import { MEDMEMORY_QUERY_METRICS } from './medmemory-official.js';
 import { assertStaticCareHarnessMode, positiveInteger, sha256, stableJson } from './matched-utils.js';
-import { medMemoryStudentPolicyManifest } from './medmemory-student-policy.js';
-import { MEDMEMORY_INVESTIGATION_STRATEGY_PROVENANCE,MEDMEMORY_INVESTIGATION_STRATEGY_VERSION,PROMPTS } from './prompts.js';
+import { MEDMEMORY_INVESTIGATION_STRATEGY_PROVENANCE,MEDMEMORY_INVESTIGATION_STRATEGY_VERSION,medMemoryStudentPolicyManifest } from './medmemory-policy.js';
+import { PROMPTS } from './prompts.js';
 import { RECENT_SESSION_WINDOW } from './recent-session-context.js';
 import { PATIENT_PROFILE_VERSION } from './patient-profile.js';
 
@@ -14,7 +14,7 @@ export {
   validateInvestigationPolicyDecision,
 } from './matched-runtime.js';
 
-export const MATCHED_EXPERIMENT_VERSION = 'medmemory-matched-experiment.v31-relevance-before-earliest';
+export const MATCHED_EXPERIMENT_VERSION = 'medmemory-matched-experiment.v33-classified-retrieval-official-answer';
 export const MEDMEMORY_MATCHED_QUERY_TYPES = Object.freeze(Object.keys(MEDMEMORY_QUERY_METRICS));
 const MEDMEMORY_MATCHED_QUERY_TYPE_SET = new Set(MEDMEMORY_MATCHED_QUERY_TYPES);
 
@@ -85,6 +85,7 @@ export function buildMatchedManifest({
     prompt_versions: {
       memory_extractor: PROMPTS.extractor.version,
       memory_relation_classifier: PROMPTS.relation_classifier.version,
+      query_classifier: PROMPTS.medmemory_query_classifier.version,
       investigation_policy: PROMPTS.investigation_policy.version,
       relation_evaluator: PROMPTS.careharness_evaluate.version,
       answer: PROMPTS.medmemory_answer.version,
@@ -105,16 +106,17 @@ export function buildMatchedManifest({
     scheduling: {
       query_concurrency: positiveInteger(query_concurrency, 'query_concurrency'),
       independent_queries_parallel: true,
-      per_query_dependency_order: ['investigation', 'answer', 'judge'],
+      per_query_dependency_order: ['query_classifier', 'investigation', 'answer', 'judge'],
       result_order: 'adapter_query_order',
     },
-    information_policy: { runtime_gold_or_judge_metadata_allowed: false, post_answer_offline_diagnosis_allowed: true,public_query_type_strategy_profiles:true,strategy_profiles_contain_case_content:false,oracle_teacher_runtime_separated:true,offline_strategy_teacher:{...MEDMEMORY_INVESTIGATION_STRATEGY_PROVENANCE},offline_student_policy_status:offlineStudentPolicy.status,offline_student_runtime_overlap:offlineStudentPolicy.runtime_overlap,deterministic_question_temporal_gate:true,persistent_refine_boundary:true,hybrid_lexical_embedding_search:true,embedding_respects_structured_constraints:true,semantic_shortest_path_trace:true,mq_option_specific_retrieval_merged_before_joint_answer:true,state_update_answer_selected_memory_only:true,state_update_answer_excludes_assessor_artifacts:true,state_projection_conservative_refine:true,relative_date_documentation_lag_days:30,patient_profile_version:PATIENT_PROFILE_VERSION,patient_profile_query_independent:true,patient_profile_unranked:true,patient_profile_includes_recent_navigation:false,patient_profile_recent_sessions_disjoint:true,profile_backing_nodes_excluded_from_retrieval:true,recent_session_window:RECENT_SESSION_WINDOW,recent_sessions_unranked:true,historical_memory_only_investigation:true,answer_memory_edges_persistent_verified_source_grounded:true,query_time_connections_are_graph_facts:false },
+    information_policy: { runtime_gold_or_judge_metadata_allowed: false, post_answer_offline_diagnosis_allowed: true,query_classifier_question_only:true,predicted_query_type_controls_retrieval:true,official_query_type_hidden_from_retrieval_policy:true,official_query_type_controls_answer_prompt:true,public_query_type_strategy_profiles:true,strategy_profiles_contain_case_content:false,oracle_teacher_runtime_separated:true,offline_strategy_teacher:{...MEDMEMORY_INVESTIGATION_STRATEGY_PROVENANCE},offline_student_policy_status:offlineStudentPolicy.status,offline_student_runtime_overlap:offlineStudentPolicy.runtime_overlap,deterministic_question_temporal_gate:true,persistent_refine_boundary:true,hybrid_lexical_embedding_search:true,embedding_respects_structured_constraints:true,semantic_shortest_path_trace:true,mq_option_specific_retrieval_merged_before_joint_answer:true,state_update_answer_selected_memory_only:true,state_update_answer_excludes_assessor_artifacts:true,state_projection_conservative_refine:true,relative_date_documentation_lag_days:30,patient_profile_version:PATIENT_PROFILE_VERSION,patient_profile_query_independent:true,patient_profile_unranked:true,patient_profile_includes_recent_navigation:false,patient_profile_recent_sessions_disjoint:true,profile_backing_nodes_excluded_from_retrieval:true,recent_session_window:RECENT_SESSION_WINDOW,recent_sessions_unranked:true,historical_memory_only_investigation:true,answer_memory_edges_persistent_verified_source_grounded:true,query_time_connections_are_graph_facts:false },
     action_policy_learning,
     action_policy_exploration,
     method_claims: {
       persistent_unified_memory_graph: true,
       policy_owned_investigation_state: true,
       static_query_preanalysis: false,
+      runtime_query_type_classifier: true,
       transparent_query_type_adaptation: true,
       extensible_worker_registry: true,
       strict_causality_claimed: false,
@@ -201,8 +203,8 @@ function validateQueryScope({ query_ids, expectedCount, adapterCount, strictFull
 }
 
 function validateFrozenModels(models) {
-  if (!models.answer || !models.scoring_judge || !models.investigation_policy || !models.embedding) {
-    throw new Error('Matched experiments must freeze Answer Model, Scoring Judge, Investigation Policy, and local Embedding Model');
+  if (!models.answer || !models.scoring_judge || !models.query_classifier || !models.investigation_policy || !models.embedding) {
+    throw new Error('Matched experiments must freeze Answer Model, Scoring Judge, Query Classifier, Investigation Policy, and local Embedding Model');
   }
   if (stableJson(models.relation_evaluator) !== stableJson(models.answer)) {
     throw new Error('Matched experiments require relation_evaluator to use exactly the Answer Model configuration');
@@ -221,6 +223,7 @@ function normalizeModels(models = {}) {
     answer,
     relation_evaluator: models.relation_evaluator || answer,
     scoring_judge: models.scoring_judge || models.global,
+    query_classifier: models.query_classifier || models.investigation_policy || models.global,
     investigation_policy: models.investigation_policy || models.global,
     embedding: models.embedding,
   };

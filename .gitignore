@@ -1,21 +1,47 @@
+# 本地环境变量与密钥
 .env
-/careharness.db
-/careharness.db-shm
-/careharness.db-wal
+.env.*
+!.env.example
+
+# 依赖、虚拟环境与缓存
+node_modules/
+.venv/
+.venv-*/
+.uv-cache/
+.cache/
+.tmp/
+__pycache__/
+*.py[cod]
+
+# 本地数据库及运行时文件
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+# 保留此显式规则，便于检查默认数据库目录是否受到保护
 data/*.sqlite
 data/*.sqlite-*
-# Benchmark corpora are distributed separately and may contain patient-like data.
-data/benchmarks/
-outputs/
-# Generated evaluation artifacts can contain patient-like benchmark text and Gold/Judge traces.
-reports/medmemory-careharness-results.json
-reports/medmemory-careharness-results.md
-# Offline Oracle Teacher artifacts contain benchmark questions, Gold answers,
-# Judge-only nodes and trap metadata. They are analysis inputs, never runtime or
-# source artifacts, and must not be swept into a commit with `git add .`.
-reports/medmemory-oracle-teacher*.json
-reports/optimization-round-*.json
-node_modules/
-.DS_Store
-coverage/
+*.pid
 *.log
+
+# Benchmark 原始数据单独分发，不进入源码仓库
+data/benchmarks/
+
+# 运行时学习结果；需要复现实验时由脚本重新生成
+/data/*action-values*.json
+/data/cv-action-policy-*.json
+
+# 实验输出可能包含 Benchmark 上下文、Gold 和 Judge 信息
+/reports/
+reports/medmemory-careharness-results.json
+reports/optimization-round-*.json
+/outputs/
+/coverage/
+
+# 编辑器、系统和临时文件
+.DS_Store
+*.swp
+*~
+/20

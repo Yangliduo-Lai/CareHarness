@@ -1,6 +1,7 @@
 import { MEMORY_FAMILIES } from './schema.js';
 import { genericClinicalBridgeGrounding,normalizeHypothesisGroundingScope,patientClaimGrounding } from './claim-grounding.js';
 import { minimalLiteralSupplement,sanitizeLiteralSupplement } from './literal-supplement.js';
+export { MEDMEMORY_INVESTIGATION_STRATEGIES,MEDMEMORY_INVESTIGATION_STRATEGY_PROVENANCE,MEDMEMORY_INVESTIGATION_STRATEGY_VERSION,medMemoryInvestigationStrategy } from './medmemory-policy.js';
 
 const ROUTER_TAXONOMY=JSON.stringify({families:MEMORY_FAMILIES});
 
@@ -14,8 +15,8 @@ export const MEDMEMORY_SHARED_SYSTEM_PROMPT=`You are the patient’s personalize
 // 仅把 Answer 中供人阅读的自然语言固定为简体中文。
 export const MEDMEMORY_CHINESE_ANSWER_REQUIREMENT='Language Requirement: Write all natural-language answer text in Simplified Chinese. Preserve exact medication names, abbreviations, dates, measurements, units, and option letters from the source; for multiple-choice questions, still output option letters only.';
 
-// 来源：CareHarness 针对 MedMemoryBench EEM 严格 string_contain metric 的数值格式补丁；
-// 任务：只规范数值、单位与记法，不改写非数值实体名称或注入病例答案。
+// 来源：CareHarness 针对 MedMemoryBench EEM 严格 string_contain metric 的输出格式补丁；
+// 任务：规范数值、单位、限定词、并列形式与题干槽位后缀，不注入任何病例答案。
 export const MEDMEMORY_EEM_NUMERIC_FORMAT_PATCH=`EEM Numeric Format Patch:
 
 When the requested target is quantitative, output the value or range in exactly one line using the mandatory format below. Do not add an explanation, sentence prefix, Markdown, or trailing punctuation.
@@ -39,18 +40,32 @@ When the requested target is quantitative, output the value or range in exactly 
 - pH and E/e' → number only
 - Walking tolerance → <number>米
 - Longitudinal strain → decimal fraction with an ASCII minus sign and no percent symbol; for example, convert -16% to -0.16.
+- Repetition frequency per second → <number or range> Hz
+  Convert 下/秒 or 次/秒 to Hz. Use an en dash “–” for a range and keep one space before Hz.
 
 Use the exact unit capitalization, slash, superscript ², and spacing shown above. Never output 毫克, 个单位, ㎡, or a bare number for a measurement that requires a unit.
 
 Preserve the original numeric magnitude, decimal places, comparison sign, negative sign, and whether the value is a single value or a range.
 
-For a non-quantitative target, follow the original EEM Answer Requirements without applying any additional entity-name normalization.`;
+EEM Strict-Containment Surface Rules:
+
+- Return only the shortest complete answer span. Do not paraphrase it into a sentence or add a subject such as “症状”, “患者”, or “检查显示”. If a concise chart phrase and a longer synonymous sentence are both visible, copy the concise phrase.
+- Preserve every answer-bearing qualifier from the chart: “约/大约”, “以上/以下”, “每日/每次”, negation, direction, and range. Never drop an approximate marker merely because the number is unchanged.
+- When the requested frequency is stated as a daily threshold, use the compact form “每日<number>次以上”; do not replace it with “十余次”, parentheses, an example maximum, or a longer explanation.
+- For exactly two requested entities, join the two complete entity spans with “与”, with no list punctuation or surrounding prose.
+- Match the semantic slot named by the question. If it asks for a region, segment, drug class, dosage form, or another typed entity, retain the explicit slot head/suffix supplied by the question or chart (for example “区”, “段”, “类”, or “片”); do not output only its modifier.
+- For an explicitly documented unchanged outcome, prefer the chart’s compact polarity term such as “无改善” over a synonymous full sentence.
+
+These are surface-form rules only. They never permit inventing a missing fact, number, qualifier, entity head, or suffix.`;
 
 // 来源：CareHarness MQ 输出基数补丁，不是论文官方 Prompt；任务：区分题干明确要求的
 // 单一最优选择与普通多选，避免“最适宜/最需要/最优先”题输出多个并列答案。
 export const MEDMEMORY_MQ_CARDINALITY_PATCH=`MQ Selection Cardinality Patch:
 If the question stem explicitly asks which one option is the single best, most appropriate, most necessary, highest-priority, most likely, or similar unique superlative choice (for example, “最适宜”, “最需要”, “最优先”, or “最合适”), output exactly one option letter: the best-supported choice after comparing all options. A superlative word appearing only inside an option does not trigger this rule.
-Otherwise, treat the question as multiple-select: assess every option and output all correct option letters.`;
+Otherwise, treat the question as multiple-select: assess every option and output all correct option letters.
+The option_state_index preserves which independent option investigation retrieved each historical State, while selected_states contains one deduplicated copy of every State. The index is not a verdict or an exclusivity rule: read every selected State and apply it to every option whose meaning it directly supports or contradicts, even when another option's investigation originally retrieved it. These are source States, not Assessor conclusions. Judge every visible option independently from the exact State text, the visible recent Sessions, and the patient profile.
+You are explicitly allowed and expected to use established general medical knowledge as a decision source when evaluating each option, even when that general rule is not restated verbatim in a State. This includes standard indications, contraindications, drug-class effects and interactions, renal-risk precautions, and the appropriateness of routine non-drug measures. Combine that knowledge with patient-specific premises from the question and supplied memory. Do not require an otherwise correct option to have verbatim support in memory. General medical knowledge must not invent a patient diagnosis, measurement, medication exposure, preference, or event, and an explicit current patient-specific plan or constraint overrides a generic default.
+For non-superlative questions, do not stop after finding one safe or directly documented option: complete the internal check for every option and return the full set that is clinically appropriate after combining the visible patient facts with general medical knowledge.`;
 
 // 来源：CareHarness 对可见 Memory Node 的查询局部证据合同；任务：把 Assessor 已经用
 // 当前问题与可见记忆确定的 answer_focus 交给 Answer Model，防止关键事实在回答阶段丢失。
@@ -120,7 +135,7 @@ Answer:`
 export const MEDMEMORY_CAREHARNESS_ANSWER_OVERLAYS=Object.freeze({
   entity_exact_match:'CareHarness Task Overlay: Match the abstraction level requested by the question and output exactly one target entity phrase with no Markdown, label, explanation, alternative, or co-occurring finding. Treat this as literal span extraction, not paraphrase generation: copy the single most specific complete supported name, category, value, range, sign and unit character-for-character from the source that matches the requested factor and time. Never translate, abbreviate, expand, round, convert, normalize, or respell a source measurement or unit; for example, do not change mg to 毫克, U to 个单位, a decimal to a percentage, or a recorded range to one endpoint. A numeric answer is incomplete without its recorded unit. If the question asks for a class, preserve the complete class term rather than shortening it or substituting one member; if it asks for a diagnosis, output the diagnosis rather than its signs. When an unambiguous colloquial symptom phrase is supplied, use one concise standard clinical entity label. When a diagnostic acronym and its expansion are both explicitly visible, output the complete source form containing both.',
   temporal_localization:'CareHarness Task Overlay: Keep the requested event and its source date bound together. For a when/onset question return one grounded date, using the earliest matching occurrence when requested. When the question already gives a date and asks what happened, return only that event content. Never substitute a similar event from a neighboring date or add an alternative answer.',
-  state_update:'CareHarness Task Overlay: Apply the question’s time scope and compare only the same factor. Put the requested latest value, range, status, direction, or complete plan in the first sentence. For current/latest status use the latest effective update; for a dated period use the latest explicit same-factor update inside that period. A later chart entry that explicitly recalls the requested recent period is valid same-factor evidence; do not discard its concrete value merely because its documentation date is later. If any selected state directly gives the requested value or plan, copy it instead of claiming the information is absent. Never substitute a treatment target, warning threshold, recommendation, intended trial, or later unrelated state for the actual observed state. Preserve concrete plan components, values, ranges and units, and do not let an older baseline or a different action override the requested factor. Never mention selected_memory_nodes, memory storage, retrieval, context availability, or other system internals in the answer.',
+  state_update:'CareHarness State Focus: Answer in the question’s language and put the requested factor first. Return only the minimum patient-specific fact needed to answer the question. Every answer must demonstrate patient-memory use with exactly one compact grounding anchor inside the answer sentence. Prefer “According to the YYYY-MM-DD record, ...”, using the event_time of the selected answer-bearing State. If no reliable source date is visible but the question supplies a patient-specific prior value or status, use that exact baseline in the same sentence as “from <baseline> to <new state>”. Never invent a date or grounding detail, and do not use a generic phrase such as “according to memory” without a concrete date or baseline. For a single value, time, or status lookup, output exactly one direct sentence containing that one grounding anchor, the requested factor, and its exact value or status. When the question supplies a prior value or status and asks for its update, output exactly one direct sentence stating the change from the supplied baseline to the selected new value or status. Add a second sentence only when the question explicitly asks for a cause, reason, interpretation, or advice. Otherwise do not add mechanisms, clinical interpretation, improvement or worsening claims, recommendations, reassurance, unrelated history, treatment background, evidence lists, or extra dates. Do not use Markdown headings or bullets. Use the selected change record that explicitly binds a supplied baseline to its new value; do not replace it with a later isolated continuation unless the question explicitly asks for an as-of-later-date value. Otherwise apply the question’s time scope and use the latest explicit same-factor update inside it—not an older baseline, a different factor, a target, or a recommendation. Copy the exact value, range, unit, status, and every distinct component of a selected plan. If a selected state gives the answer, do not claim it is unavailable. Do not add unsupported facts or mention system internals.',
   multiple_choice:'CareHarness Task Overlay: First determine answer cardinality from the question stem. If it explicitly asks for one unique superlative choice—such as the single most appropriate, necessary, urgent, likely, or highest-priority option—compare all options and output exactly one best-supported letter. Otherwise perform exhaustive multiple selection: silently judge every visible option as supported, contradicted, or unresolved and output the exact union of all supported letters. Prefer the latest patient-specific plan and constraints over generic plausibility. Sort a multi-answer set alphabetically and emit uppercase letters separated by commas with no spaces or other text.',
   inference_generation:'CareHarness Task Overlay: Answer the requested decision first, then give a compact source-grounded patient chain. Preserve applicable diagnosis/stage, objective severity or trajectory, actual treatment execution and response/failure, manifestations/red flags, contraindications and feasible constraints when they materially affect the decision. Compare a proximal lifestyle trigger with disease progression or treatment failure only when the chart supports those paths. Do not invent patient facts; established medical knowledge may only connect cited facts. Respect the visible Session boundary, use the worst supported marker for urgent risk, distinguish “do not self-adjust” from “the current regimen is sufficient,” and keep the answer within 600 Chinese characters.',
   multi_hop_clinical_deduction:'CareHarness Task Overlay: Use exactly three compact sections—Key memory, Reasoning chain, and Comprehensive judgment—within 1800 Chinese characters. Select all distinct question-relevant patient facts needed for the chain, normally 4–10, preserving dates, values, units, treatments, diagnoses and symptom timing. Build one chronological chain across baseline/diagnosis, exposure or treatment, response/progression, mechanism and outcome; express every adjacent relation explicitly. If a mechanism is absent from the chart, label it as clinical inference and use medical knowledge only to connect visible patient endpoints. Never invent a patient event or output internal IDs.'
@@ -135,80 +150,11 @@ export const MEDMEMORY_EFFECTIVE_ANSWER_CONTRACTS=Object.freeze({
   default:Object.freeze({language:'match the question language',grounding:'Use only the supplied memory_source. Gold answers, answer explanations, source key points, and Judge metadata are unavailable during answer generation.',format:'Follow the MedMemoryBench appendix Answer Prompt for the selected task.'}),
   entity_exact_match:Object.freeze({format:'Provide the target entity name directly as exactly one target entity phrase. Copy its literal source spelling, category, value/range/sign and unit without translation, abbreviation, expansion, rounding or conversion. A numeric answer must include its recorded unit. Output no explanation or Markdown.'}),
   temporal_localization:Object.freeze({format:'For a when/recorded-time question output exactly one YYYY-MM-DD date and nothing else; for a dated event-content question output only the requested event.'}),
-  state_update:Object.freeze({format:'Describe the patient’s most recent status, starting with the exact requested latest value, range, status, direction, or complete plan from the Refine-selected Memory Nodes. For a dated period use the latest explicit same-factor update inside that period. Never replace an actual state with a target, threshold, recommendation, intended trial, or unrelated later state, and never mention runtime internals. Be concise and direct.'}),
-  multiple_choice:Object.freeze({format:'If the question stem explicitly requests one unique superlative choice, compare all options and output exactly one best-supported uppercase letter. Otherwise adjudicate every visible option and output the complete sorted uppercase letter set with commas and no spaces, such as B or B,D. Do not provide any explanation.'}),
+  state_update:Object.freeze({format:'Return only the minimum patient-specific answer that describes the patient’s most recent status from the Refine-selected Memory Nodes. Demonstrate memory use with exactly one compact grounding anchor in the same sentence: prefer the selected answer-bearing State date, or use the exact question-supplied patient baseline when no reliable date is visible. Never invent an anchor or use a generic uncited memory claim. Use exactly one direct sentence for a value, time, status, or baseline-to-update lookup; add a second sentence only when the question explicitly asks for a cause, interpretation, or advice. Preserve the exact requested value, range, unit, status, direction, or complete plan. For a dated period use the latest explicit same-factor update inside that period. Never add unasked mechanisms, recommendations, reassurance, unrelated history, extra dates, a target, threshold, intended trial, unrelated later state, or runtime internals.'}),
+  multiple_choice:Object.freeze({format:'If the question stem explicitly requests one unique superlative choice, compare all options and output exactly one best-supported uppercase letter. Otherwise adjudicate every visible option and output the complete sorted uppercase letter set with commas and no spaces, such as B or B,D. Use established general medical knowledge together with supplied patient-specific facts; a correct option need not be stated verbatim in memory, but general knowledge must not invent a patient fact. Do not provide any explanation.'}),
   inference_generation:Object.freeze({format:'Reason from this patient’s specific remembered information; do not give generic medical advice. Review every question-selected Final State and incorporate all distinct facts that materially support, qualify, or challenge the conclusion, while omitting only irrelevant, redundant, temporally inapplicable, or contradicted facts. Maintain a warm yet professional tone, be concise and direct, avoid boilerplate, and connect the evidence compactly to the recommendation.'}),
   multi_hop_clinical_deduction:Object.freeze({format:'Clearly list the memory content used. Present a clear reasoning path from evidence to conclusions. Provide a final comprehensive judgment.'})
 });
-
-/**
- * 来源：MedMemoryBench Clean 标注的跨 Persona 聚合分析；任务：向 Investigation
- * Policy/Assessor 暴露透明的题型级证据合同。这里绝不保存单题文本、答案、
- * source_key_points、required_patient_info、Judge node 或患者专有词；这些字段只可由
- * scripts/distill-medmemory-policy.mjs 在离线 teacher 报告中读取。
- */
-export const MEDMEMORY_INVESTIGATION_STRATEGY_VERSION='medmemory-investigation-strategy.v2-auditable-offline-student';
-export const MEDMEMORY_INVESTIGATION_STRATEGY_PROVENANCE=Object.freeze({
-  source:'MedMemoryBench Clean offline oracle teacher',
-  persona_count:20,
-  total_question_count:1986,
-  eligible_question_count:1939,
-  teacher_read_question_gold_and_judge_metadata:true,
-  runtime_retains_case_content:false,
-  runtime_uses_public_query_type:true,
-  evaluation_note:'A score on these same 20 personas is training-set/oracle-assisted; use persona-held-out or leave-one-persona-out evaluation to measure generalization.'
-});
-export const MEDMEMORY_INVESTIGATION_STRATEGIES=deepFreezePromptObject({
-  entity_exact_match:{
-    strategy_id:'exact_entity',answer_memory_limit:10,answer_focus_limit:1,reasoning_hypotheses:false,target_only_assessment:true,disabled_workers:['trace'],
-    evidence_contract:['one requested entity at the question\'s abstraction level','literal name/class/value/range/unit','one source-cited target fact'],
-    preferred_path:['search a rare literal or semantic paraphrase','assess the exact target','refine only distractors','verify','answer'],
-    stop_condition:'The exact requested entity, including any material range or unit, is source-cited.',
-    policy_directive:'Do not build a causal hypothesis. Preserve the source category wording when the question asks for a class rather than a member.'
-  },
-  temporal_localization:{
-    strategy_id:'event_time_pair',answer_memory_limit:12,answer_focus_limit:2,reasoning_hypotheses:false,target_only_assessment:true,disabled_workers:[],
-    evidence_contract:['the requested event and its date as one pair','an executable exact/range/earliest temporal boundary','nearby same-Session context only when needed to disambiguate'],
-    preferred_path:['apply the temporal boundary','search and semantically rank inside that boundary','contextualize only a matching Session','assess the event-time pair','verify','answer'],
-    stop_condition:'Exactly one source-cited event-time pair answers the direction of the question.',
-    policy_directive:'Never substitute a nearby date or a different occurrence of the same symptom. For first/onset questions keep the earliest boundary permanent.'
-  },
-  state_update:{
-    strategy_id:'factor_trajectory',answer_memory_limit:20,answer_focus_limit:10,reasoning_hypotheses:false,target_only_assessment:false,disabled_workers:[],
-    evidence_contract:['the same factor at baseline and latest applicable update','adoption, reversal, or execution events that determine the current version','the concrete latest value, status, or complete plan components'],
-    preferred_path:['search the named factor','trace its longitudinal versions','assess baseline versus current','retain all non-redundant updates inside scope','verify','answer'],
-    stop_condition:'The latest effective state is source-cited; when the chart documents a change, the update that makes it current is also retained.',
-    policy_directive:'A recent exception does not erase a sustained baseline pattern, and an old summary does not override a newer explicit update.'
-  },
-  multiple_choice:{
-    strategy_id:'option_claim_matrix',answer_memory_limit:16,answer_focus_limit:8,reasoning_hypotheses:false,target_only_assessment:false,disabled_workers:[],
-    evidence_contract:['every visible option as an independent atomic claim','patient-specific support or contradiction for every option','shared allergies, contraindications, preferences, execution facts, and current-version constraints only when relevant'],
-    preferred_path:['assess visible Profile and recent Sessions option by option','search one unresolved historical option constraint','reassess the complete option matrix','verify','answer'],
-    stop_condition:'Every option has a source-grounded supported, contradicted, or genuinely unresolved status.',
-    policy_directive:'Treat symptoms and circumstances stated in the question as visible facts. Do not search for prospective examination findings merely to decide recorded option feasibility, and do not group drugs from different classes.'
-  },
-  inference_generation:{
-    strategy_id:'patient_specific_decision_chain',answer_memory_limit:20,answer_focus_limit:10,reasoning_hypotheses:true,target_only_assessment:false,disabled_workers:[],
-    evidence_contract:['confirmed condition or disease stage','objective severity and longitudinal trajectory','actual treatment exposure and execution','response, failure, or adverse effect','manifestations, complications, contraindications, and feasible constraints that can change the decision'],
-    preferred_path:['assess the visible chart representation','search the strongest missing diagnosis/trajectory/treatment-response anchor','trace from a retrieved anchor across time','reassess all material final states','refine only true distractors','verify','answer'],
-    stop_condition:'The recommendation is supported by a compact source-cited patient chain and the strongest competing explanation has been checked.',
-    policy_directive:'Do not stop at a proximal lifestyle trigger when diagnosis, treatment failure, complication, or objective deterioration is visible or still searchable. Prioritize up to ten non-duplicate material facts for answer_focus, grouping only facts that share one source-supported role.'
-  },
-  multi_hop_clinical_deduction:{
-    strategy_id:'node_relation_chain',answer_memory_limit:24,answer_focus_limit:16,reasoning_hypotheses:true,target_only_assessment:false,disabled_workers:[],
-    evidence_contract:['dated patient-specific start, intermediate, and outcome anchors','objective values, treatments, symptoms, diagnoses, and timing preserved literally','explicit relations between adjacent anchors','a clearly marked clinical-inference bridge when no chart node can contain the mechanism'],
-    preferred_path:['search distinct endpoints with multiple narrow lenses','trace shortest graph paths from visible anchors toward the missing endpoint or bridge','assess node coverage and adjacent relations','search one missing patient endpoint if necessary','refine while preserving the chain','verify','answer'],
-    stop_condition:'The final packet contains source-cited chronological endpoints that form a logical chain; any chart-absent mechanism connecting them is explicitly marked as clinical inference rather than a graph fact.',
-    policy_directive:'Do not mistake mechanism-only annotation language for retrievable patient history. When a bridge is absent from the chart, retain its patient endpoints and label the bridge as clinical inference rather than repeatedly searching for nonexistent wording.'
-  }
-});
-
-export function medMemoryInvestigationStrategy(task){
-  const profile=MEDMEMORY_INVESTIGATION_STRATEGIES[String(task||'')];
-  return profile?JSON.parse(JSON.stringify({version:MEDMEMORY_INVESTIGATION_STRATEGY_VERSION,query_type:String(task),...profile})):null;
-}
-
-function deepFreezePromptObject(value){if(!value||typeof value!=='object'||Object.isFrozen(value))return value;for(const child of Object.values(value))deepFreezePromptObject(child);return Object.freeze(value);}
 
 // 来源：各 benchmark 的任务协议或当前公开数据边界。
 // 任务：统一登记所有 benchmark 的 Answer Model 输出合同；adapter 只能按 benchmark + task 选择，
@@ -315,10 +261,10 @@ export function renderMedMemoryAnswerPrompt(input={}){
   if(!template)throw new Error(`No MedMemoryBench appendix Answer Prompt for ${input.task||'unknown task'}`);
   const memorySource=input.task==='state_update'?compactMedMemorySource(input):input.memory_source||compactMedMemorySource(input);
   const rendered=template.replace('<memory_source>',JSON.stringify(memorySource)).replace('<question>',String(input.question||''));
-  // EEM 保留官方附录模板，只追加不涉及实体名称的确定性数值格式规范。
+  // EEM 保留官方附录模板，只追加不含病例答案的确定性 strict-containment 格式规范。
   if(input.task==='entity_exact_match')return rendered.replace(/\nAnswer:$/u,`\n${MEDMEMORY_EEM_NUMERIC_FORMAT_PATCH}\nAnswer:`);
-  // SUA 严格使用附录官方 Answer Prompt；MQ 只追加输出基数补丁。
-  if(input.task==='state_update')return rendered;
+  // SUA/MQ 均保留附录正文，只追加不含隐藏评测信息的任务执行约束。
+  if(input.task==='state_update')return rendered.replace(/\nAnswer:$/u,`\n${MEDMEMORY_CAREHARNESS_ANSWER_OVERLAYS.state_update}\nAnswer:`);
   if(input.task==='multiple_choice')return rendered.replace(/\nAnswer:$/u,`\n${MEDMEMORY_MQ_CARDINALITY_PATCH}\nAnswer:`);
   const evidenceRequirement=input.task==='state_update'?MEDMEMORY_STATE_ONLY_REQUIREMENT:MEDMEMORY_QUERY_EVIDENCE_REQUIREMENT;
   const taskOverlay=MEDMEMORY_CAREHARNESS_ANSWER_OVERLAYS[input.task]||'';
@@ -351,6 +297,15 @@ export function compactMedMemorySource(input={}){
   // brief before the longitudinal navigation profile. Dropping all but the newest
   // Session used to erase a material update that Assess had legitimately reviewed.
   if(input.task==='inference_generation')return{recent_sessions:recentSessions,query_evidence_brief:queryEvidenceBrief,historical_memory_nodes:memoryNodes,patient_profile:patientProfile,memory_edges:memoryEdges};
+  if(input.task==='multiple_choice'){
+    const selectedStates=memoryNodes.map(node=>{
+      // Older graphs may carry a coarse whole-node polarity that conflicts
+      // with the exact proposition text (for example, an affirmed adherence
+      // statement containing "没有漏药"). MQ uses the source text itself.
+      const {polarity:_coarsePolarity,...state}=node;return state;
+    }),availableIds=new Set(selectedStates.map(node=>String(node.memory_id))),optionStateIndex=arrayOf(input.mq_option_retrieval?.options).map(option=>({letter:String(option?.letter||''),text:String(option?.text||''),state_ids:[...new Set(arrayOf(option?.selected_memory_ids).map(String).filter(id=>availableIds.has(id)))]})).filter(item=>/^[A-F]$/u.test(item.letter)&&item.text);
+    return{option_state_index:optionStateIndex,selected_states:selectedStates,recent_sessions:recentSessions,patient_profile:patientProfile,memory_edges:memoryEdges};
+  }
   return{patient_profile:patientProfile,recent_sessions:recentSessions,historical_memory_nodes:memoryNodes,memory_edges:memoryEdges,query_evidence_brief:queryEvidenceBrief};
 }
 
@@ -815,6 +770,18 @@ Return only the family matrix: {"families":[["PE","CS"],["CP"]]}
   generator: { version: 'generator.policy-memory.compact.v4', description: 'Write the Doctor Agent response for the fixed Action Policy using only the current Patient message and supplied memory.', contract: `Return only {"response":"non-empty user-facing string"}. Do not change the action or invent facts. Code fixes action_type and citations.` },
   // 来源：CareHarness Core Conversation；任务：审核 Doctor 草稿是否满足 Action Policy 与安全约束。
   auditor: { version: 'auditor.policy.compact.v5', description: 'Audit the response against the Action Policy constraints.', contract: `Return only {"passed":true,"violations":[],"safe_response":"string"}. Use only the supplied Memory Nodes, Memory Edges, Action Policy, and drafted response.` },
+  // 来源：CareHarness 对 MedMemoryBench 六个公开任务定义的通用分类合同；任务：只根据原始问题选择运行时题型，不读取适配器标签或评测信息。
+  medmemory_query_classifier:{version:'medmemory-query-classifier.v1-question-only',description:'Classify one MedMemoryBench question into exactly one of the six public query types using only the question text.',contract:`Return exactly {"query_type":"entity_exact_match|temporal_localization|state_update|multiple_choice|inference_generation|multi_hop_clinical_deduction","confidence":0.0,"rationale":"brief Simplified Chinese reason"}.
+
+Classify the operation requested by the question, not the medical topic:
+- entity_exact_match: extract one exact entity, class, diagnosis, symptom, value, range, unit, or short phrase; no historical-time localization or current-state update is requested.
+- temporal_localization: determine when an event occurred, or what event/value occurred at a specified absolute or relative time, including onset/first-occurrence questions.
+- state_update: report the latest/current state or the effective update of the same factor, often relative to an older baseline.
+- multiple_choice: select one or more answers from explicit lettered options.
+- inference_generation: make a patient-specific recommendation, safety judgment, treatment decision, or focused explanation that requires clinical inference.
+- multi_hop_clinical_deduction: integrate several visits or facts into an explicit multi-step causal, mechanistic, or longitudinal reasoning chain and comprehensive judgment.
+
+Precedence: explicit options → multiple_choice; an explicit historical time target → temporal_localization; latest/current update → state_update; recommendation or action decision → inference_generation; explicit multi-step causal synthesis → multi_hop_clinical_deduction; otherwise exact extraction → entity_exact_match. Do not infer from a benchmark label, Gold answer, Judge metadata, Session id, patient memory, or answer format because none is supplied.`},
   // 来源：CareHarness Core Adaptive Investigation Runtime；任务：直接读取原问题、当前信息与历史步骤，选择下一 Worker；不接收静态 Query Plan、槽位或 benchmark 评测信息。
   investigation_policy: { version: 'careharness-investigation-policy.closed-loop.v30-quality-weighted-learning', description: 'Choose the next information-gathering worker with a clinician-like chart workflow, optionally informed by a transparent task-level strategy profile, a case-free offline Student aggregate, and a quality-weighted learned action prior. Recent verbatim records are read by Assess/Answer except when the caller requests a unified state projection, while Policy receives their index and query-independent Profile to avoid repeatedly rereading the chart. Strategy profiles and Student aggregates contain only task-level evidence contracts or aggregate frequencies and never contain a case answer, patient fact, Gold, Judge metadata, or hidden node. Executable temporal fields and persistent Refine boundaries constrain later Actions; local BGE-small-zh-v1.5 augments literal Search without bypassing structured constraints.', contract: `Return exactly {"worker":"one value copied from allowed_workers","information_status":"unknown|insufficient|sufficient","instruction":{"objective":"one bounded task for the selected worker"},"rationale":"brief control rationale"}.
 
@@ -844,7 +811,7 @@ Rules:
 - missing_information refers only to a fact that may already exist elsewhere in the visible chart. Do not search for a prospective test, examination, image, measurement, or monitoring result merely because it would be useful to obtain now. Before pursuing a gap, prefer a recorded prior analogous episode, treatment-response transition, objective trend, diagnosis/stage, complication, or patient-specific explanation that can resolve the question from existing history.
 - Treat facts explicitly stated in the current question as visible query facts, not as historical records that must be rediscovered. Retrieve the prior patient information that changes the interpretation or safe action. In particular, a word such as “昨晚” inside a current symptom-and-treatment question is not an instruction to invent a calendar base date; use a relative-date constraint only when a visible anchor date actually makes the offset resolvable.
 - Temporal Scope Rule: Use hard temporal constraints only for an explicit date/range or a relative date with a clear anchor. “Latest”, “current”, and “recent” indicate ranking preferences, not hard date boundaries. For such questions, first find records that explicitly contain the requested value, status, or plan, then select the latest among them. A newer generic mention must not exclude an older answer-bearing record or create a new date boundary.
-- When a latest/current-value question supplies a baseline, search the factor, baseline literal, and likely change/update wording together; do not use the full Question as one undifferentiated search query.
+- When a latest/current-value question supplies a baseline, search the factor, baseline literal, and likely change/update wording together; do not use the full Question as one undifferentiated search query. If a relative time phrase belongs grammatically to that baseline clause, it is not a target-time restriction: investigate subsequent same-factor updates before creating any permanent Refine boundary.
 - Copy worker from allowed_workers exactly. Never select an unavailable worker.
 - information_status describes whether the currently visible patient-specific information is enough to answer responsibly. Use sufficient only when the present information and verification state support termination; use insufficient when a concrete information gap remains; otherwise use unknown.
 - instruction is a step-local, bounded worker request, not a patient fact and not an answer. State only what this worker should investigate or check now. The orchestrator treats it as opaque; the selected worker owns its future schema.
@@ -881,7 +848,7 @@ For an explanation or longitudinal treatment-response judgment, do not reduce th
 
 Every patient-specific statement must be grounded in cited source_refs. General medical knowledge may connect grounded facts only inside reasoning_hypotheses and must not create a patient diagnosis, value, treatment, behavior or event. Cite only supplied source_ref values; never invent an ID. The runtime discards an answer_focus item when its wording does not match its cited source. A chronological edge does not prove causation. Prefer nonredundant sources spanning the needed chain over repeated paraphrases. Preserve uncertainty, attribution and counterevidence. Write all free-text fields in Simplified Chinese. Do not answer the user, retrieve information, select the next worker, create fixed query slots, or use Gold, Answer Explanation, Judge metadata, hidden nodes, official reasoning chains, or future Sessions.`},
   // 来源：MedMemoryBench 官方附录基础模板 + 透明 CareHarness 题型 overlay；任务：EEM/TLA/SUA/MQ/IG/MCD 的答案生成入口。
-  medmemory_answer:{version:'medmemorybench-answer.appendix-v1-careharness-overlay-v31-mq-cardinality',description:'MedMemoryBench EEM uses the official appendix prompt plus a deterministic numeric/unit-format patch; SUA uses only its official appendix Answer Prompt; MQ adds a generic single-superlative-versus-multiple-select cardinality patch; the other tasks retain their transparent CareHarness overlays.',render:renderMedMemoryAnswerPrompt,messages:medMemoryAnswerMessages},
+  medmemory_answer:{version:'medmemorybench-answer.appendix-v1-careharness-overlay-v41-mq-general-medical-knowledge',description:'MedMemoryBench EEM uses the official appendix prompt plus a deterministic strict-containment surface-format patch covering units, qualifiers, paired entities, and typed-slot suffixes; SUA returns a minimal one-sentence patient-specific value, status, time, or baseline-bound transition with exactly one concrete memory grounding anchor unless the question explicitly requests explanation; MQ receives a deduplicated source-only State pool plus an option retrieval index and explicitly combines supplied patient facts with established general medical knowledge without allowing generic knowledge to invent patient facts; the other tasks retain their transparent CareHarness overlays.',render:renderMedMemoryAnswerPrompt,messages:medMemoryAnswerMessages},
   // 来源：MedMemoryBench 官方附录 Judge 基础 + 本地中文理由 overlay；任务：答案冻结后的 TLA/SUA/IG/MCD 评分；EEM/MQ 不走此提示词。
   medmemory_judge: { version: 'medmemorybench-official-judge.appendix-v1-zh-rationale-v2', description: 'MedMemoryBench appendix post-answer LLM-as-Judge criteria and JSON schema with free-text reason/note values constrained to Simplified Chinese.', render: renderMedMemoryJudgePrompt },
   // 来源：MedLoCoMo 公开 QA 协议派生（论文未给出逐字 Answer Prompt）；任务：以纯文本生成 ≤10 词短答案。
