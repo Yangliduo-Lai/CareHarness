@@ -1,5 +1,6 @@
 import { MEMORY_FAMILIES } from './schema.js';
 import { createQuestionRequest } from './investigation-contract.js';
+import { canonicalCalendarDate as canonicalDate,canonicalCalendarMonth as canonicalMonthOnly } from './temporal-expressions.js';
 
 /**
  * Build one worker-local retrieval request. The original question is retained
@@ -14,7 +15,7 @@ export function createMemoryRetrievalRequest(questionRequest,instruction={}){
 }
 
 export function retrieveMemoryCandidates(request,memoryNodes=[],options={}){
-  const retrieval=createMemoryRetrievalRequest(request?.question_request||request?.request||request?.question||request,request?.instruction),spec=interpretInstruction(retrieval.instruction),nodes=dedupeNodes(memoryNodes),edges=array(options.memory_edges),limit=Math.min(positiveInteger(options.limit)||defaultLimit(spec),spec.max_results||Infinity),terms=searchTerms(spec),semanticScores=normalizeSemanticScores(options.semantic_scores),semanticTopK=Math.max(0,positiveInteger(options.semantic_top_k)||0),byId=new Map(nodes.map(node=>[String(node.memory_id||''),node])),allSemanticRanked=[...semanticScores.entries()].filter(([id,score])=>{const node=byId.get(id);if(!node||!Number.isFinite(score))return false;const text=normalize([node.text,node.source_text].filter(Boolean).join(' ')),matched=terms.filter(term=>text.includes(normalize(term)));return matchesConstraints(node,text,matched,terms,spec,true);}).sort((left,right)=>right[1]-left[1]||left[0].localeCompare(right[0])),semanticRanked=allSemanticRanked.slice(0,semanticTopK),semanticTopIds=new Set(semanticRanked.map(([id])=>id)),semanticRanks=new Map(allSemanticRanked.map(([id],index)=>[id,index+1])),exactTemporalSemantic=spec.has_exact_temporal_scope&&allSemanticRanked.length>0,records=[];
+  const retrieval=createMemoryRetrievalRequest(request?.question_request||request?.request||request?.question||request,request?.instruction),spec=interpretInstruction(retrieval.instruction),nodes=dedupeNodes(memoryNodes),edges=array(options.memory_edges),limit=Math.min(positiveInteger(options.limit)||defaultLimit(spec),spec.max_results||Infinity),aspectTopK=Math.max(1,Math.min(8,positiveInteger(options.aspect_top_k)||1)),strictFactDiversity=options.strict_fact_diversity===true,terms=searchTerms(spec),semanticScores=normalizeSemanticScores(options.semantic_scores),semanticTopK=Math.max(0,positiveInteger(options.semantic_top_k)||0),byId=new Map(nodes.map(node=>[String(node.memory_id||''),node])),allSemanticRanked=[...semanticScores.entries()].filter(([id,score])=>{const node=byId.get(id);if(!node||!Number.isFinite(score))return false;const text=normalize([node.text,node.source_text].filter(Boolean).join(' ')),matched=terms.filter(term=>text.includes(normalize(term)));return matchesConstraints(node,text,matched,terms,spec,true);}).sort((left,right)=>right[1]-left[1]||left[0].localeCompare(right[0])),semanticRanked=allSemanticRanked.slice(0,semanticTopK),semanticTopIds=new Set(semanticRanked.map(([id])=>id)),semanticRanks=new Map(allSemanticRanked.map(([id],index)=>[id,index+1])),exactTemporalSemantic=spec.has_exact_temporal_scope&&allSemanticRanked.length>0,records=[];
   for(const node of nodes){
     const id=String(node.memory_id||''),rawText=[node.text,node.source_text].filter(Boolean).join(' '),text=normalize(rawText),matched=terms.filter(term=>text.includes(normalize(term))),numbers=numberSet(rawText),semanticScore=semanticScores.get(id),semanticRank=semanticRanks.get(id),semanticEligible=exactTemporalSemantic?Number.isFinite(semanticScore):semanticTopIds.has(id),reasons=[];
     if(!matchesConstraints(node,text,matched,terms,spec,semanticEligible))continue;
@@ -39,18 +40,21 @@ export function retrieveMemoryCandidates(request,memoryNodes=[],options={}){
     const preferenceScore=temporalPreferenceScore(node,spec);if(preferenceScore){score+=preferenceScore;reasons.push('instruction_time_preference');}
     records.push({node,score:+score.toFixed(3),reasons,matched_terms:matched,numeric_matches:numericMatches,matched_lenses:lensMatches.map(item=>item.id),embedding_similarity:Number.isFinite(semanticScore)?+semanticScore.toFixed(6):null,embedding_rank:semanticRank||null});
   }
-  const recordComparator=exactTemporalSemantic?compareExactTemporalSemantic:(left,right)=>right.score-left.score||compareTime(left.node,right.node,spec.temporal_preference||spec.temporal_operator)||String(left.node.memory_id).localeCompare(String(right.node.memory_id));
+  if(isMedLoCoMoCrossAdmissionScope(retrieval.question_request))annotateLiteralAnchors(records,terms);
+  const defaultRecordComparator=exactTemporalSemantic?compareExactTemporalSemantic:(left,right)=>right.score-left.score||compareTime(left.node,right.node,spec.temporal_preference||spec.temporal_operator)||String(left.node.memory_id).localeCompare(String(right.node.memory_id)),reranked=typeof options.candidate_reranker==='function'?options.candidate_reranker({question_request:retrieval.question_request,instruction:retrieval.instruction,records:[...records],memory_nodes:nodes,semantic_scores:semanticScores,dense_admission_features:options.dense_admission_features}):null,rerankerTrace=reranked?.trace||{status:'not_configured'};
+  if(Array.isArray(reranked?.records)&&reranked.records.length===records.length)records.splice(0,records.length,...reranked.records);
+  const pairwiseApplied=rerankerTrace.status==='applied'||rerankerTrace.ranking_applied===true,recordComparator=pairwiseApplied?(left,right)=>Number(left.pairwise_rank||Infinity)-Number(right.pairwise_rank||Infinity)||defaultRecordComparator(left,right):defaultRecordComparator;
   records.sort(recordComparator);
   // latest/current without an explicit calendar scope is a ranking preference,
   // not permission to discard every earlier answer-bearing record. Relevance
   // and payload-bearing matches remain available; exact dates/ranges were
   // already enforced as hard constraints by matchesConstraints above.
-  const timeScoped=records,diversity=partitionNearDuplicateRecords(timeScoped,recordComparator),selected=selectWithDiversityBackfill(diversity,spec,limit,exactTemporalSemantic,recordComparator),expanded=!exactTemporalSemantic&&spec.expand_graph?expandGraph(selected,nodes,edges,limit):selected,ranked=expanded.map((entry,index)=>({...entry,rank:index+1})),ids=new Set(ranked.map(entry=>String(entry.node.memory_id))),selectedEdges=edges.filter(edge=>ids.has(String(edge.from_memory_id))&&ids.has(String(edge.to_memory_id)));
+  const timeScoped=records,diversity=partitionNearDuplicateRecords(timeScoped,recordComparator),episodeDiversity=options.episode_diversity===true,medLoCoMoCrossAdmission=episodeDiversity&&isMedLoCoMoCrossAdmissionScope(retrieval.question_request),countAllRelevantAdmissions=String(retrieval.question_request.query_type||'')==='frequency_pattern',crossAdmissionSelection=medLoCoMoCrossAdmission?selectMedLoCoMoCrossAdmissionRelevant(diversity,limit,recordComparator,{count_all_relevant_admissions:countAllRelevantAdmissions,admission_shortlist_limit:medLoCoMoAdmissionShortlistLimit(retrieval.question_request,limit,countAllRelevantAdmissions)}):null,selected=crossAdmissionSelection?.records||(episodeDiversity?selectWithEpisodeDiversity(diversity,limit,recordComparator,{strict_fact_diversity:strictFactDiversity}):selectWithDiversityBackfill(diversity,spec,limit,exactTemporalSemantic,recordComparator,{aspect_top_k:aspectTopK,strict_fact_diversity:strictFactDiversity})),expanded=!crossAdmissionSelection&&!exactTemporalSemantic&&spec.expand_graph?expandGraph(selected,nodes,edges,limit):selected,ranked=expanded.map((entry,index)=>({...entry,rank:index+1})),ids=new Set(ranked.map(entry=>String(entry.node.memory_id))),selectedEdges=edges.filter(edge=>ids.has(String(edge.from_memory_id))&&ids.has(String(edge.to_memory_id)));
   return{
     memory_nodes:ranked.map(entry=>entry.node),
     memory_edges:selectedEdges,
     candidates:ranked.map(candidateTrace),
-    trace:{version:'careharness-memory-retrieval.worker-v9-objective-literal-anchors',memory_pool_size:nodes.length,candidate_count:records.length,near_duplicate_candidate_count:diversity.deferred.length,distinct_fact_candidate_count:diversity.primary.length,selected_memory_count:ranked.length,selected_edge_count:selectedEdges.length,selection_mode:exactTemporalSemantic?'exact_temporal_embedding_top_k':semanticRanked.length?'policy_instruction_hybrid_lexical_embedding':'policy_instruction_only',lexical_filter_mode:spec.has_exact_scope?'rank_within_exact_scope':semanticRanked.length?'filter_by_terms_or_embedding_top_k':'filter_by_terms',ranking_primary:exactTemporalSemantic?'embedding_similarity':'composite_score',embedding_candidate_count:semanticRanked.length,embedding_scored_scope_count:allSemanticRanked.length,resolved_temporal:spec.resolved_temporal,zero_recall:ranked.length===0,worker_instruction:retrieval.instruction,ranked:ranked.map(candidateTrace)},
+    trace:{version:'careharness-memory-retrieval.worker-v14-aspect-balanced-fact-clusters',memory_pool_size:nodes.length,candidate_count:records.length,near_duplicate_candidate_count:diversity.deferred.length,distinct_fact_candidate_count:diversity.primary.length,fact_clusters:diversity.groups,strict_fact_diversity:strictFactDiversity,aspect_top_k:aspectTopK,candidate_episode_count:new Set(records.map(entry=>String(entry.node?.episode_id||entry.node?.observation_id||entry.node?.memory_id||''))).size,selected_episode_count:new Set(ranked.map(entry=>String(entry.node?.episode_id||entry.node?.observation_id||entry.node?.memory_id||''))).size,episode_diversity:episodeDiversity,selected_memory_count:ranked.length,selected_edge_count:selectedEdges.length,selection_mode:crossAdmissionSelection&&pairwiseApplied?'medlocomo_cross_admission_shortlist_then_turn':episodeDiversity?'episode_diverse_'+(semanticRanked.length?'hybrid_lexical_embedding':'policy_instruction'):exactTemporalSemantic?'exact_temporal_embedding_top_k':semanticRanked.length?'policy_instruction_hybrid_lexical_embedding':'policy_instruction_only',lexical_filter_mode:spec.has_exact_scope?'rank_within_exact_scope':semanticRanked.length?'filter_by_terms_or_embedding_top_k':'filter_by_terms',ranking_primary:crossAdmissionSelection?(pairwiseApplied?'medlocomo_pairwise_admission_shortlist_then_global_turn':'medlocomo_relevance_then_episode_diversity'):pairwiseApplied?'medlocomo_pairwise_admission_then_turn':exactTemporalSemantic?'embedding_similarity':'composite_score',candidate_reranker:rerankerTrace,...(crossAdmissionSelection?{cross_admission_selection:crossAdmissionSelection.trace}:{}),embedding_candidate_count:semanticRanked.length,embedding_scored_scope_count:allSemanticRanked.length,resolved_temporal:spec.resolved_temporal,zero_recall:ranked.length===0,worker_instruction:retrieval.instruction,ranked:ranked.map(candidateTrace)},
   };
 }
 
@@ -155,6 +159,7 @@ function matchesConstraints(node,text,matched,terms,spec,semanticEligible=false)
   if(!spec.has_exact_scope&&terms.length&&!semanticEligible&&(spec.term_match==='all'?matched.length!==terms.length:matched.length===0))return false;
   return true;
 }
+
 function attributedSourceTypes(node,normalizedText){
   const source=String(node.source_type||'').toLowerCase(),types=new Set(source?[source]:[]),text=normalizedText||normalize([node.text,node.source_text].filter(Boolean).join(' '));
   if(source==='structured'){
@@ -171,19 +176,87 @@ function compareExactTemporalSemantic(left,right){
 function partitionNearDuplicateRecords(records,comparator){
   const groups=[];
   for(const record of records){const group=groups.find(items=>items.some(item=>obviousNearDuplicateFact(item.node,record.node)));if(group)group.push(record);else groups.push([record]);}
-  const primary=[],deferred=[];
+  const primary=[],deferred=[],clusterRows=[];
   for(const group of groups){
     const representative=[...group].sort(compareDuplicateRepresentative)[0];primary.push(representative);
     deferred.push(...group.filter(item=>item!==representative));
+    clusterRows.push({representative_memory_id:String(representative.node.memory_id),source_memory_ids:group.map(item=>String(item.node.memory_id)),source_refs:group.map(item=>`memory:${String(item.node.memory_id)}`),episode_ids:[...new Set(group.map(item=>episodeKey(item.node)))]});
   }
   primary.sort(comparator);deferred.sort(comparator);
-  return{primary,deferred};
+  return{primary,deferred,groups:clusterRows};
 }
-function selectWithDiversityBackfill(partition,spec,limit,exactTemporalSemantic,comparator){
-  const primary=exactTemporalSemantic?partition.primary.slice(0,limit):balancedSelect(partition.primary,spec,limit),selected=[...primary],seen=new Set(selected.map(item=>String(item.node.memory_id)));
-  if(selected.length<limit)for(const record of partition.deferred){const id=String(record.node.memory_id);if(!seen.has(id)){seen.add(id);selected.push(record);if(selected.length>=limit)break;}}
+function selectWithDiversityBackfill(partition,spec,limit,exactTemporalSemantic,comparator,options={}){
+  const primary=exactTemporalSemantic?partition.primary.slice(0,limit):balancedSelect(partition.primary,spec,limit,options.aspect_top_k),selected=[...primary],seen=new Set(selected.map(item=>String(item.node.memory_id)));
+  if(options.strict_fact_diversity!==true&&selected.length<limit)for(const record of partition.deferred){const id=String(record.node.memory_id);if(!seen.has(id)){seen.add(id);selected.push(record);if(selected.length>=limit)break;}}
   return exactTemporalSemantic?selected.sort(comparator):selected;
 }
+function selectWithEpisodeDiversity(partition,limit,comparator,options={}){
+  const ranked=[...partition.primary,...(options.strict_fact_diversity===true?[]:partition.deferred)].sort(comparator),groups=new Map();
+  for(const record of ranked){const key=String(record.node?.episode_id||record.node?.observation_id||record.node?.memory_id||''),values=groups.get(key)||[];values.push(record);groups.set(key,values);}
+  const ordered=[...groups.values()].sort((left,right)=>comparator(left[0],right[0])),selected=[];
+  // Round-robin selection prevents repeated summaries from one Admission from
+  // exhausting the packet before another matching Admission is represented.
+  for(let depth=0;selected.length<limit&&ordered.some(values=>depth<values.length);depth++)for(const values of ordered){if(values[depth])selected.push(values[depth]);if(selected.length>=limit)break;}
+  return selected;
+}
+function selectMedLoCoMoCrossAdmissionRelevant(partition,limit,recordComparator,options={}){
+  const decorated=partition.primary.map(record=>({record,duplicate_tier:0})),groups=new Map();
+  for(const item of decorated){const episode=episodeKey(item.record.node),values=groups.get(episode)||[];values.push(item);groups.set(episode,values);}
+  const allRecords=decorated.map(item=>item.record),semanticFrontier=Math.max(1,Math.min(allRecords.length,Math.max(4,Math.ceil(limit/2)))),orderedAdmissions=[...groups.entries()].map(([episode,values])=>{
+    const byTurn=new Map();for(const item of values){const key=turnKey(item.record.node),items=byTurn.get(key)||[];items.push(item);byTurn.set(key,items);}
+    const turnCandidates=[],duplicates=[];for(const items of byTurn.values()){items.sort(compareCrossAdmissionTurnCandidate);turnCandidates.push(items[0]);duplicates.push(...items.slice(1));}
+    turnCandidates.sort(compareCrossAdmissionTurnCandidate);duplicates.sort(compareCrossAdmissionTurnCandidate);
+    const directlyRelevant=values.some(item=>recordHasDirectRelevance(item.record)),semanticRelevant=values.some(item=>Number(item.record.embedding_rank)>0&&Number(item.record.embedding_rank)<=semanticFrontier),literalAnchorCount=values.filter(item=>item.record.literal_anchor===true).length;
+    return{episode,turn_candidates:turnCandidates,duplicates,directly_relevant:directlyRelevant,semantic_relevant:semanticRelevant,literal_anchor_count:literalAnchorCount,admission_rank:minimumFinite(values.map(item=>item.record.pairwise_admission_rank)),admission_score:maximumFinite(values.map(item=>item.record.pairwise_admission_score)),best_score:maximumFinite(values.map(item=>item.record.score)),first_index:Math.min(...values.map(item=>Number(item.record.pairwise_original_index)||0))};
+  }).sort(compareCrossAdmissionShortlist),relevantAdmissions=orderedAdmissions.filter(item=>item.directly_relevant||item.semantic_relevant||item.literal_anchor_count>0).sort(compareRelevantAdmission),fallbackCount=Math.max(1,Math.min(orderedAdmissions.length,Math.ceil(Math.sqrt(orderedAdmissions.length)))),eligible=relevantAdmissions.length?relevantAdmissions:orderedAdmissions.slice(0,fallbackCount),shortlistTarget=positiveInteger(options.admission_shortlist_limit)||(options.count_all_relevant_admissions===true?Math.max(4,Math.ceil(limit/3)):Math.max(2,Math.ceil(Math.sqrt(limit)))),shortlistLimit=Math.min(eligible.length,shortlistTarget),shortlist=eligible.slice(0,shortlistLimit),selected=[],seen=new Set(),add=item=>{const record=item?.record,id=String(record?.node?.memory_id||''),literalDuplicate=record&&selected.some(chosen=>(chosen.literal_anchor===true||record.literal_anchor===true)&&obviousNearDuplicateFact(chosen.node,record.node));if(id&&!seen.has(id)&&!literalDuplicate&&selected.length<limit){seen.add(id);selected.push(record);}};
+  // Exact source-literal matches are evidence anchors, not just another State
+  // for the learned reranker to discard.  Select at most one anchor for each
+  // source Turn before applying Admission diversity.
+  const literalByTurn=new Map();
+  for(const item of shortlist.flatMap(admission=>[...admission.turn_candidates,...admission.duplicates]).filter(item=>item.record.literal_anchor===true)){
+    const key=turnKey(item.record.node),prior=literalByTurn.get(key);if(!prior||compareLiteralAnchor(item,prior)<0)literalByTurn.set(key,item);
+  }
+  for(const item of[...literalByTurn.values()].sort(compareLiteralAnchor))add(item);
+  // Diversity is now a tie-breaker inside the relevance-qualified Admission
+  // set. An Admission with only a low-ranked embedding candidate no longer
+  // receives an unconditional slot at the expense of a direct match.
+  for(const admission of shortlist)add(admission.turn_candidates[0]);
+  const remaining=shortlist.flatMap(admission=>admission.turn_candidates).filter(item=>!seen.has(String(item.record?.node?.memory_id||''))).sort((left,right)=>compareRelevanceBeforePairwise(left.record,right.record)||compareCrossAdmissionTurnCandidate(left,right)||recordComparator(left.record,right.record));
+  for(const item of remaining)add(item);
+  return{records:selected,trace:{version:'medlocomo-cross-admission-selection.v3-distilled-admission-budget',scope:'cross_admission',candidate_admission_count:orderedAdmissions.length,relevant_candidate_count:allRecords.filter(record=>recordHasDirectRelevance(record)||Number(record.embedding_rank)>0&&Number(record.embedding_rank)<=semanticFrontier).length,relevant_admission_count:relevantAdmissions.length,semantic_frontier_rank:semanticFrontier,admission_shortlist_target:shortlistTarget,admission_shortlist_limit:shortlistLimit,shortlisted_admission_count:shortlist.length,shortlisted_admission_ranks:shortlist.map(item=>item.admission_rank),one_turn_quota_per_admission:true,one_turn_quota_scope:'relevance_qualified_admissions_only',count_all_relevant_admissions:options.count_all_relevant_admissions===true,protected_literal_anchor_count:selected.filter(record=>record.literal_anchor===true).length,remaining_fill:'global_relevance_then_pairwise_turn_within_shortlist',near_duplicate_backfill:false,unique_turns_before_duplicate_states:true,selected_admission_count:new Set(selected.map(item=>episodeKey(item.node))).size,selected_memory_count:selected.length}};
+}
+function medLoCoMoAdmissionShortlistLimit(questionRequest,limit,countAllRelevantAdmissions){
+  const learned=positiveInteger(questionRequest?.strategy_profile?.evidence_admission_p90);
+  if(learned)return Math.min(limit,countAllRelevantAdmissions?Math.max(learned,Math.ceil(learned*4/3)):Math.max(2,Math.min(Math.ceil(limit/2),learned*2)));
+  return Math.min(limit,countAllRelevantAdmissions?Math.max(4,Math.ceil(limit/3)):Math.max(2,Math.ceil(Math.sqrt(limit))));
+}
+function compareCrossAdmissionShortlist(left,right){return compareFiniteAscending(left.admission_rank,right.admission_rank)||compareFiniteDescending(left.admission_score,right.admission_score)||left.first_index-right.first_index||left.episode.localeCompare(right.episode);}
+function compareRelevantAdmission(left,right){return compareFiniteDescending(left.literal_anchor_count,right.literal_anchor_count)||Number(right.directly_relevant)-Number(left.directly_relevant)||Number(right.semantic_relevant)-Number(left.semantic_relevant)||compareFiniteDescending(left.best_score,right.best_score)||compareCrossAdmissionShortlist(left,right);}
+function compareCrossAdmissionTurnCandidate(left,right){return compareFiniteAscending(left.record.pairwise_turn_rank,right.record.pairwise_turn_rank)||compareFiniteDescending(left.record.pairwise_turn_score,right.record.pairwise_turn_score)||left.duplicate_tier-right.duplicate_tier||compareFiniteDescending(left.record.score,right.record.score)||Number(left.record.pairwise_original_index||0)-Number(right.record.pairwise_original_index||0);}
+function compareLiteralAnchor(left,right){return compareFiniteDescending(left.record.literal_anchor_strength,right.record.literal_anchor_strength)||compareRelevanceBeforePairwise(left.record,right.record)||compareCrossAdmissionTurnCandidate(left,right);}
+function compareRelevanceBeforePairwise(left,right){return compareFiniteDescending(relevanceTier(left),relevanceTier(right))||compareFiniteDescending(left.literal_anchor_strength,right.literal_anchor_strength)||compareFiniteDescending(left.score,right.score);}
+function relevanceTier(record){if(record?.literal_anchor===true)return 4;if(array(record?.numeric_matches).length)return 3;if(array(record?.matched_terms).length)return 2;if(array(record?.matched_lenses).length)return 1;return 0;}
+function recordHasDirectRelevance(record){return relevanceTier(record)>0;}
+function compareFiniteAscending(left,right){const a=Number(left),b=Number(right),safeA=Number.isFinite(a)?a:Infinity,safeB=Number.isFinite(b)?b:Infinity;return safeA===safeB?0:safeA<safeB?-1:1;}
+function compareFiniteDescending(left,right){const a=Number(left),b=Number(right),safeA=Number.isFinite(a)?a:-Infinity,safeB=Number.isFinite(b)?b:-Infinity;return safeA===safeB?0:safeA>safeB?-1:1;}
+function minimumFinite(values){const finite=values.map(Number).filter(Number.isFinite);return finite.length?Math.min(...finite):Infinity;}
+function maximumFinite(values){const finite=values.map(Number).filter(Number.isFinite);return finite.length?Math.max(...finite):-Infinity;}
+function episodeKey(node){return String(node?.episode_id||node?.observation_id||node?.memory_id||'');}
+function turnKey(node){return`${episodeKey(node)}\u0000${String(node?.turn_id||node?.memory_id||'')}`;}
+function annotateLiteralAnchors(records,terms){
+  const episodes=new Set(records.map(record=>episodeKey(record.node))),turns=new Set(records.map(record=>turnKey(record.node))),episodeFrequency=new Map(),turnFrequency=new Map();
+  for(const term of terms){const key=normalize(term);if(!key)continue;const matching=records.filter(record=>array(record.matched_terms).some(value=>normalize(value)===key));episodeFrequency.set(key,new Set(matching.map(record=>episodeKey(record.node))).size);turnFrequency.set(key,new Set(matching.map(record=>turnKey(record.node))).size);}
+  const rareEpisodeLimit=Math.max(2,Math.ceil(episodes.size*.25)),rareTurnLimit=Math.max(2,Math.ceil(turns.size*.1));
+  for(const record of records){
+    if(!isLiteralProvenanceNode(record.node)){record.literal_anchor=false;record.literal_anchor_strength=0;continue;}
+    const strong=array(record.matched_terms).map(term=>({term,key:normalize(term),episode_frequency:episodeFrequency.get(normalize(term))||Infinity,turn_frequency:turnFrequency.get(normalize(term))||Infinity})).filter(item=>isSpecificLiteralTerm(item.term,item.key)&&item.episode_frequency<=rareEpisodeLimit&&item.turn_frequency<=rareTurnLimit);
+    record.literal_anchor=strong.length>0;
+    record.literal_anchor_strength=record.literal_anchor?Math.max(...strong.map(item=>Math.min(12,item.key.length)+1/Math.max(1,item.episode_frequency)+1/Math.max(1,item.turn_frequency))):0;
+    if(record.literal_anchor&&!record.reasons.includes('protected_literal_anchor'))record.reasons.push('protected_literal_anchor');
+  }
+}
+function isLiteralProvenanceNode(node){return String(node?.construction_kind||'')==='literal_provenance'||String(node?.memory_id||'').includes(':source-turn:')||node?.literal_provenance===true;}
+function isSpecificLiteralTerm(term,key=normalize(term)){return key.length>=4&&(/[\d+]/u.test(key)||/[.\-_/]/u.test(String(term||''))||/[A-Z].*[A-Z]/u.test(String(term||''))||key.length>=6);}
 function compareDuplicateRepresentative(left,right){
   const leftQuality=duplicateRepresentativeQuality(left),rightQuality=duplicateRepresentativeQuality(right);
   for(let index=0;index<leftQuality.length;index++)if(leftQuality[index]!==rightQuality[index])return rightQuality[index]-leftQuality[index];
@@ -191,11 +264,11 @@ function compareDuplicateRepresentative(left,right){
 }
 function duplicateRepresentativeQuality(entry){
   const source=String(entry?.node?.source_text||''),literalProtected=(source.match(/\d+(?:\.\d+)?|%|mmol\/?L|mg\/?dL|mg|kg|mmHg|bpm|单位|毫克|千克|分钟|小时/giu)||[]).length,similarity=Number.isFinite(entry.embedding_similarity)?entry.embedding_similarity:-1,literalCompleteness=(source?2:0)+Math.min(3,literalProtected)*.5+Math.min(360,normalize(source||entry?.node?.text).length)/1000,combined=(Number(entry.score)||0)+literalCompleteness;
-  return[(entry.numeric_matches||[]).length,(entry.matched_terms||[]).length,(entry.matched_lenses||[]).length,combined,similarity,literalCompleteness];
+  return[entry.literal_anchor===true?1:0,Number(entry.literal_anchor_strength)||0,(entry.numeric_matches||[]).length,(entry.matched_terms||[]).length,(entry.matched_lenses||[]).length,combined,similarity,literalCompleteness];
 }
 function obviousNearDuplicateFact(left,right){
   const leftSession=String(left?.episode_id||left?.observation_id||''),rightSession=String(right?.episode_id||right?.observation_id||'');
-  if(!leftSession||leftSession!==rightSession||!compatibleSourceRole(left,right)||retrievalPolarity(left)!==retrievalPolarity(right)||retrievalQuantitiesConflict(left,right))return false;
+  if(String(left?.subject_id||'')!==String(right?.subject_id||'')||!leftSession||leftSession!==rightSession||!compatibleSourceRole(left,right)||retrievalPolarity(left)!==retrievalPolarity(right)||retrievalQuantitiesConflict(left,right))return false;
   const leftTexts=retrievalFactTexts(left),rightTexts=retrievalFactTexts(right);let best=0;
   for(const a of leftTexts)for(const b of rightTexts){
     if(a===b)return true;
@@ -213,9 +286,9 @@ function retrievalQuantitiesConflict(left,right){const a=retrievalQuantitySignat
 function retrievalQuantitySignature(node){const values=new Set();for(const text of[node?.text,node?.source_text])for(const match of String(text||'').normalize('NFKC').matchAll(/[-+]?(?:\d+(?:\.\d+)?|\.\d+)(?:\s*[-–~至]\s*\d+(?:\.\d+)?)?\s*(?:%|mmol\/?l|mg\/?dl|mg|mcg|g|kg|ml|l|mmhg|bpm|iu|u|单位|毫克|微克|克|千克|毫升|升|次|分钟|小时|天)?/giu))values.add(match[0].replace(/\s+/gu,'').toLowerCase().replace(/[~至–]/gu,'-'));return values;}
 function textGramSimilarity(left,right){const a=new Set(characterGrams(left,2)),b=new Set(characterGrams(right,2));if(!a.size||!b.size)return 0;let hits=0;for(const gram of a)if(b.has(gram))hits++;return hits/Math.max(a.size,b.size);}
 function characterGrams(value,size){const out=[];for(let index=0;index<=value.length-size;index++)out.push(value.slice(index,index+size));return out;}
-function balancedSelect(records,spec,limit){const selected=[],seen=new Set(),add=record=>{const id=String(record?.node?.memory_id||'');if(id&&!seen.has(id)&&selected.length<limit){seen.add(id);selected.push(record);}};for(const lens of spec.lenses)add(records.find(record=>record.matched_lenses.includes(lens.id)));for(const family of [...spec.family_weights].sort((a,b)=>b.weight-a.weight))add(records.find(record=>array(record.node.families).includes(family.family)));for(const record of records)add(record);return selected;}
+function balancedSelect(records,spec,limit,aspectTopK=1){const selected=[],seen=new Set(),add=record=>{const id=String(record?.node?.memory_id||'');if(id&&!seen.has(id)&&selected.length<limit){seen.add(id);selected.push(record);}};for(const lens of spec.lenses)for(const record of records.filter(item=>item.matched_lenses.includes(lens.id)).slice(0,Math.max(1,Number(aspectTopK)||1)))add(record);for(const family of [...spec.family_weights].sort((a,b)=>b.weight-a.weight))add(records.find(record=>array(record.node.families).includes(family.family)));for(const record of records)add(record);return selected;}
 function expandGraph(selected,nodes,edges,limit){const out=[...selected],deferred=[],byId=new Map(nodes.map(node=>[String(node.memory_id),node])),seen=new Set(out.map(entry=>String(entry.node.memory_id))),frontier=[...seen];for(let depth=0;depth<2&&frontier.length&&out.length<limit;depth++){const next=[];for(const id of frontier)for(const edge of edges){const neighbor=String(edge.from_memory_id)===id?String(edge.to_memory_id):String(edge.to_memory_id)===id?String(edge.from_memory_id):null;if(!neighbor||seen.has(neighbor)||!byId.has(neighbor))continue;seen.add(neighbor);next.push(neighbor);const entry={node:byId.get(neighbor),score:Math.max(0,4-depth),reasons:['memory_graph_neighbor'],matched_terms:[],numeric_matches:[],matched_lenses:[],expanded_from:id};if(out.some(current=>obviousNearDuplicateFact(current.node,entry.node)))deferred.push(entry);else out.push(entry);if(out.length>=limit)break;}frontier.splice(0,frontier.length,...next);}for(const entry of deferred)if(out.length<limit)out.push(entry);return out;}
-function candidateTrace(entry){return{memory_id:entry.node.memory_id,episode_id:entry.node.episode_id||null,event_time:entry.node.event_time||null,families:entry.node.families||[],score:entry.score,reasons:entry.reasons,matched_terms:entry.matched_terms||[],numeric_matches:entry.numeric_matches||[],matched_lenses:entry.matched_lenses||[],embedding_similarity:entry.embedding_similarity??null,embedding_rank:entry.embedding_rank??null,expanded_from:entry.expanded_from||null,rank:entry.rank||null};}
+function candidateTrace(entry){return{memory_id:entry.node.memory_id,episode_id:entry.node.episode_id||null,event_time:entry.node.event_time||null,families:entry.node.families||[],score:entry.score,reasons:entry.reasons,matched_terms:entry.matched_terms||[],numeric_matches:entry.numeric_matches||[],matched_lenses:entry.matched_lenses||[],literal_anchor:entry.literal_anchor===true,literal_anchor_strength:Number(entry.literal_anchor_strength)||0,embedding_similarity:entry.embedding_similarity??null,embedding_rank:entry.embedding_rank??null,...(Number.isFinite(entry.pairwise_admission_score)?{pairwise_admission_score:+entry.pairwise_admission_score.toFixed(6),pairwise_admission_rank:entry.pairwise_admission_rank,pairwise_turn_score:+entry.pairwise_turn_score.toFixed(6),pairwise_turn_rank:entry.pairwise_turn_rank,pairwise_turn_rank_within_admission:entry.pairwise_turn_rank_within_admission,pairwise_rank:entry.pairwise_rank}:{}),expanded_from:entry.expanded_from||null,rank:entry.rank||null};}
 function normalizeSemanticScores(value){if(value instanceof Map)return new Map([...value].map(([id,score])=>[String(id),Number(score)]));if(!value||typeof value!=='object'||Array.isArray(value))return new Map();return new Map(Object.entries(value).map(([id,score])=>[String(id),Number(score)]));}
 function recencyScore(node,nodes){const values=nodes.map(item=>Date.parse(item.event_time||'')).filter(Number.isFinite),time=Date.parse(node.event_time||'');return values.length&&Number.isFinite(time)?4*Math.max(0,(time-Math.min(...values))/Math.max(1,Math.max(...values)-Math.min(...values))):0;}
 function earlinessScore(node,nodes){const values=nodes.map(item=>Date.parse(item.event_time||'')).filter(Number.isFinite),time=Date.parse(node.event_time||'');return values.length&&Number.isFinite(time)?4*Math.max(0,(Math.max(...values)-time)/Math.max(1,Math.max(...values)-Math.min(...values))):0;}
@@ -225,13 +298,12 @@ function temporalPreferenceScore(node,spec){
   const progress=Math.max(0,Math.min(1,(time-start)/(end-start)));return 4*(spec.temporal_preference==='earliest'?1-progress:progress);
 }
 function compareTime(left,right,operator){const a=Date.parse(left?.event_time||''),b=Date.parse(right?.event_time||'');if(!Number.isFinite(a)||!Number.isFinite(b)||a===b)return 0;return operator==='earliest'?a-b:b-a;}
-function canonicalDate(value){const raw=String(value||'').trim(),match=/^(?<year>20\d{2})[-/.](?<month>\d{1,2})[-/.](?<day>\d{1,2})(?:$|[T\s])/u.exec(raw);if(!match)return'';const year=Number(match.groups.year),month=Number(match.groups.month),day=Number(match.groups.day),date=new Date(Date.UTC(year,month-1,day));return date.getUTCFullYear()===year&&date.getUTCMonth()===month-1&&date.getUTCDate()===day?date.toISOString().slice(0,10):'';}
-function canonicalMonth(value){const match=/^(20\d{2})[-/.年](\d{1,2})/.exec(String(value||''));return match?`${match[1]}-${String(match[2]).padStart(2,'0')}`:'';}
-function canonicalMonthOnly(value){const match=/^(20\d{2})[-/.年](\d{1,2})(?:月)?$/u.exec(String(value||'').trim());if(!match)return'';const month=Number(match[2]);return month>=1&&month<=12?`${match[1]}-${String(month).padStart(2,'0')}`:'';}
+function canonicalMonth(value){const match=/^(?<year>\d{4})[-/.年](?<month>\d{1,2})/u.exec(String(value||'').normalize('NFKC').trim());return match?canonicalMonthOnly(`${match.groups.year}-${match.groups.month}`):'';}
 function resolveDateKeys(temporal){const dates=new Set(unique(temporal.date_keys).map(canonicalDate).filter(Boolean)),base=canonicalDate(temporal.base_date),offset=Number(temporal.offset_days??0);if(base&&Number.isInteger(offset)&&Math.abs(offset)<=3660){const value=new Date(`${base}T00:00:00.000Z`);value.setUTCDate(value.getUTCDate()+offset);dates.add(value.toISOString().slice(0,10));}return dates;}
 function numberSet(value){return new Set((String(value||'').match(/\d+(?:\.\d+)?/g)||[]).map(item=>String(Number(item))));}
 function defaultLimit(spec){return spec.expand_graph?42:spec.lenses.length?36:28;}
 function dedupeNodes(nodes){const out=[],seen=new Set();for(const node of array(nodes)){const id=String(node?.memory_id||'');if(!id||seen.has(id))continue;seen.add(id);out.push(node);}return out;}
+function isMedLoCoMoCrossAdmissionScope(request){return String(request?.strategy_namespace||'')==='medlocomo'&&String(request?.scope||'')==='cross_admission';}
 function unique(values){return[...new Set(toArray(values).map(value=>String(value||'').normalize('NFKC').trim()).filter(Boolean))];}
 function toArray(value){return Array.isArray(value)?value:value==null?[]:[value];}
 function array(value){return Array.isArray(value)?value:[];}

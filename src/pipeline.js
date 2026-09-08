@@ -27,13 +27,13 @@ export class Pipeline {
   constructor(store, config = {}) { this.store=store; this.config=config; this.gateway=config.gateway || new ModelGateway(config.model || {provider:'mock',model:'careharness-rules-v1'}); this.componentGateways=config.componentGateways || {}; }
   gatewayFor(component) { return this.componentGateways[component] || this.gateway; }
 
-  async preprocess(rawObservation) {
+  async preprocess(rawObservation, options={}) {
     const observation=validateObservation(rawObservation),prepared={observation};
     try {
-      const extracted=await extractMemoryNodesWithRecovery(this.gatewayFor('extractor'),observation);
+      const extracted=await extractMemoryNodesWithRecovery(this.gatewayFor('extractor'),observation,{requireNonEmpty:requiresNonEmptyExtraction(options.dataset,observation),preserveMedLoCoMoSourceTurns:usesMedLoCoMoSourceTurnFallback(options.dataset,observation)});
       attachMemoryWarnings(extracted);prepared.memory_nodes=extracted.value;prepared.extractorTrace=extracted.trace;
       prepared.routerInput=prepared.memory_nodes.map((item,index)=>({id:String(index),text:item.text,source:item.source_type}));
-      const routed=await tagMemoryWithFallback(this.gatewayFor('router'),prepared.routerInput,prepared.memory_nodes,observation);
+      const routed=await tagMemoryWithFallback(this.gatewayFor('router'),prepared.routerInput,prepared.memory_nodes,observation,medLoCoMoRouterOptions(options.dataset,observation));
       attachRouterWarnings(routed);
       prepared.routes=routed.value;prepared.routerTrace=routed.trace;
     } catch(error) { prepared.error=error; }
@@ -59,13 +59,14 @@ export class Pipeline {
       const packet=step('observation_ingest',rawObservation,observation);
       await breakpoint();
       if(prepared?.error&&!prepared.memory_nodes)throw prepared.error;
-      const extracted=prepared?quarantineUnalignedMemoryNodes({value:prepared.memory_nodes,trace:prepared.extractorTrace},packet):await extractMemoryNodesWithRecovery(this.gatewayFor('extractor'),packet);
+      const extracted=prepared?quarantineUnalignedMemoryNodes({value:prepared.memory_nodes,trace:prepared.extractorTrace},packet):await extractMemoryNodesWithRecovery(this.gatewayFor('extractor'),packet,{requireNonEmpty:requiresNonEmptyExtraction(runContext.dataset,packet),preserveMedLoCoMoSourceTurns:usesMedLoCoMoSourceTurnFallback(runContext.dataset,packet)});
+      assertRequiredExtraction(extracted,packet,runContext.dataset);
       attachMemoryWarnings(extracted);
       const extractedNodes=step('memory_node_extractor',{model_input:packet.raw_text,code_context:{observation_id:packet.observation_id,source_type:packet.source_type}},extracted.value,'completed',extracted.trace);
       await breakpoint();
       if(prepared?.error)throw prepared.error;
       const preparedRoutesReusable=Boolean(prepared)&&extractedNodes.length===prepared.memory_nodes.length&&extractedNodes.every((node,index)=>node.memory_id===prepared.memory_nodes[index]?.memory_id),routerInput=preparedRoutesReusable?prepared.routerInput:extractedNodes.map((item,index)=>({id:String(index),text:item.text,source:item.source_type}));
-      const routedResult=preparedRoutesReusable?{value:prepared.routes,trace:prepared.routerTrace}:await tagMemoryWithFallback(this.gatewayFor('router'),routerInput,extractedNodes,observation);
+      const routedResult=preparedRoutesReusable?{value:prepared.routes,trace:prepared.routerTrace}:await tagMemoryWithFallback(this.gatewayFor('router'),routerInput,extractedNodes,observation,medLoCoMoRouterOptions(runContext.dataset,observation));
       attachRouterWarnings(routedResult);
       const taggedNodes=step('multi_family_tagger',routerInput,routedResult.value,'completed',routedResult.trace);
       await breakpoint();
@@ -97,7 +98,7 @@ export class Pipeline {
       step('memory_graph_updater',graphInput,graphDelta);
       await breakpoint();
       const memory=currentMemory([...historical,...built]);
-      const memoryGraph={version:'careharness-memory-graph.v2-semantic-state',subject_id:observation.subject_id,node_count:historical.length+built.length,edge_count:historicalEdges.length+builtEdges.length,episode_membership_count:new Set([...historical,...built].map(node=>String(node.episode_id||'')).filter(Boolean)).size,family_counts:familyCounts([...historical,...built]),delta:{memory_ids:built.map(node=>node.memory_id),edge_ids:builtEdges.map(edge=>edge.edge_id),episode_memberships:graphDelta.episode_memberships}};
+      const graphNodes=[...historical,...built],memoryGraph={version:graphNodes.some(node=>node.construction_kind==='literal_provenance')?'careharness-memory-graph.v3-semantic-state-with-literal-provenance':'careharness-memory-graph.v2-semantic-state',subject_id:observation.subject_id,node_count:graphNodes.length,edge_count:historicalEdges.length+builtEdges.length,episode_membership_count:new Set(graphNodes.map(node=>String(node.episode_id||'')).filter(Boolean)).size,family_counts:familyCounts(graphNodes),delta:{memory_ids:built.map(node=>node.memory_id),edge_ids:builtEdges.map(edge=>edge.edge_id),episode_memberships:graphDelta.episode_memberships}};
       const isMock=[this.gateway,...Object.values(this.componentGateways)].every(g=>g.config.provider==='mock');
       if(phase==='memory_build'){
         const final={phase,observation,run_context:runContext,memory_nodes:built,memory_edges:builtEdges,memory_graph:memoryGraph,deltas,memory,response:null,version,mock:isMock};
@@ -251,25 +252,67 @@ function normalizeAndValidateMemoryNodes(value,observation){
   Object.defineProperty(validated,'support_bindings',{value:normalized.support_bindings||[],enumerable:false});
   return validated;
 }
-function attachMemoryWarnings(result){if(result?.value?.warnings?.length&&result.trace)result.trace.validation_warnings=result.value.warnings;if(result?.trace&&result?.value?.support_bindings?.length)result.trace.semantic_state_source_bindings=result.value.support_bindings;return result;}
-async function extractMemoryNodesWithRecovery(gateway,observation){
-  const validate=value=>normalizeAndValidateMemoryNodes(value,observation),extractorInput=semanticExtractorInput(observation),mockOutput=()=>({memory_nodes:buildSemanticContextUnits(observation).map(unit=>({text:unit.text,support_unit_ids:[unit.unit_id]}))});
-  const withSessionCoverage=result=>quarantineUnalignedMemoryNodes(transcriptBlocks(observation.raw_text).length?augmentExtractorCoverage(result,observation):result,observation);
+function attachMemoryWarnings(result){
+  if(result?.value?.warnings?.length&&result.trace)result.trace.validation_warnings=result.value.warnings;
+  if(result?.trace&&result?.value?.support_bindings?.length){
+    const literal=result.value.support_bindings.filter(binding=>binding?.binding_mode==='exact_source_turn'),semantic=result.value.support_bindings.filter(binding=>binding?.binding_mode!=='exact_source_turn');
+    result.trace.semantic_state_source_bindings=semantic;
+    if(literal.length)result.trace.literal_provenance_source_bindings=literal;
+  }
+  return result;
+}
+async function extractMemoryNodesWithRecovery(gateway,observation,options={}){
+  const requireNonEmpty=options.requireNonEmpty===true,validate=value=>{
+    const nodes=normalizeAndValidateMemoryNodes(value,observation);
+    if(requireNonEmpty&&(!Array.isArray(nodes)||nodes.length===0))throw new Error('MedLoCoMo non-empty Admission extraction must return a non-empty Memory Node array');
+    return nodes;
+  },extractorInput=semanticExtractorInput(observation),mockOutput=()=>({memory_nodes:buildSemanticContextUnits(observation).map(unit=>({text:unit.text,support_unit_ids:[unit.unit_id]}))});
+  const withSessionCoverage=(result,{literalOnly=false}={})=>{
+    let covered=!literalOnly&&transcriptBlocks(observation.raw_text).length?augmentExtractorCoverage(result,observation):result;
+    if(options.preserveMedLoCoMoSourceTurns)covered=augmentMedLoCoMoSourceTurnCoverage(covered,observation);
+    return quarantineUnalignedMemoryNodes(covered,observation);
+  };
   try{const primary=await gateway.completeJSON('extractor',extractorInput,validate,mockOutput);return withSessionCoverage(await repairInvalidSemanticStates(gateway,observation,extractorInput,primary,validate));}
   catch(error){
     const trace=error?.gatewayTrace,attempts=Array.isArray(trace?.raw_model_attempts)?trace.raw_model_attempts:[];
-    if(trace?.component!=='extractor'||trace?.error?.kind!=='truncated_output')throw error;
-    let best=null;
-    for(const attempt of attempts){
-      const recoveredPayload=recoverCompleteMemoryNodePrefix(attempt?.raw);
-      if(!recoveredPayload.memory_nodes.length)continue;
-      try{const value=validate(recoveredPayload);if(!best||value.length>best.value.length)best={value,attempt:Number(attempt.attempt)||0,recovered_item_count:recoveredPayload.memory_nodes.length};}catch{}
+    if(trace?.component==='extractor'&&trace?.error?.kind==='truncated_output'){
+      let best=null;
+      for(const attempt of attempts){
+        const recoveredPayload=recoverCompleteMemoryNodePrefix(attempt?.raw);
+        if(!recoveredPayload.memory_nodes.length)continue;
+        try{const value=validate(recoveredPayload);if(!best||value.length>best.value.length)best={value,attempt:Number(attempt.attempt)||0,recovered_item_count:recoveredPayload.memory_nodes.length};}catch{}
+      }
+      if(best?.value.length){
+        best.value.warnings.push({warning_type:'truncated_extractor_prefix_recovered',recovery_policy:'validated_complete_memory_nodes_only',source_attempt:best.attempt,recovered_item_count:best.recovered_item_count,accepted_memory_node_count:best.value.length,discarded_incomplete_suffix:true});
+        const recovered={value:best.value,trace:{...trace,finish_reason:'length_recovered',parsed_response:best.value,error:null,recovery:{mode:'validated_complete_memory_node_prefix',source_attempt:best.attempt,recovered_item_count:best.recovered_item_count,accepted_memory_node_count:best.value.length,discarded_incomplete_suffix:true}}};
+        return withSessionCoverage(await repairInvalidSemanticStates(gateway,observation,extractorInput,recovered,validate));
+      }
     }
-    if(!best?.value.length)throw error;
-    best.value.warnings.push({warning_type:'truncated_extractor_prefix_recovered',recovery_policy:'validated_complete_memory_nodes_only',source_attempt:best.attempt,recovered_item_count:best.recovered_item_count,accepted_memory_node_count:best.value.length,discarded_incomplete_suffix:true});
-    const recovered={value:best.value,trace:{...trace,finish_reason:'length_recovered',parsed_response:best.value,error:null,recovery:{mode:'validated_complete_memory_node_prefix',source_attempt:best.attempt,recovered_item_count:best.recovered_item_count,accepted_memory_node_count:best.value.length,discarded_incomplete_suffix:true}}};
-    return withSessionCoverage(await repairInvalidSemanticStates(gateway,observation,extractorInput,recovered,validate));
+    if(options.preserveMedLoCoMoSourceTurns){
+      const value=[];Object.defineProperty(value,'warnings',{value:[{warning_type:'semantic_extractor_failed_open_to_literal_provenance',failure_kind:trace?.error?.kind||'extractor_error',message:String(error?.message||error)}],enumerable:false});Object.defineProperty(value,'support_bindings',{value:[],enumerable:false});
+      return withSessionCoverage({value,trace:{...(trace||{}),component:'extractor',model_input:extractorInput,parsed_response:value,error:null,fallback_used:true,semantic_extraction_status:'failed_open_to_literal_provenance',model_validation_error:trace?.error||{kind:'extractor_error',message:String(error?.message||error)}}},{literalOnly:true});
+    }
+    throw error;
   }
+}
+
+function requiresNonEmptyExtraction(dataset,observation){
+  return String(dataset||'').toLowerCase()==='medlocomo'&&buildSemanticContextUnits(observation).some(unit=>(String(unit?.text||'').match(/[\p{L}\p{N}]/gu)||[]).length>=2);
+}
+
+function usesMedLoCoMoSourceTurnFallback(dataset,observation){
+  return String(dataset||'').toLowerCase()==='medlocomo'&&transcriptBlocks(observation?.raw_text).length>0;
+}
+
+function medLoCoMoRouterOptions(dataset,observation){
+  return usesMedLoCoMoSourceTurnFallback(dataset,observation)?{bounded_batch_concurrency:3,deterministic_literal_provenance:true,per_batch_fail_open:true}:{};
+}
+
+function assertRequiredExtraction(result,observation,dataset){
+  if(!requiresNonEmptyExtraction(dataset,observation)||result?.value?.length)return result;
+  const error=new Error('MedLoCoMo non-empty Admission produced no source-aligned Memory Nodes; the Admission was not committed');
+  if(result?.trace)error.gatewayTrace={...result.trace,error:{kind:'empty_memory_extraction',message:error.message,validation_errors:[],suggestion:'Retry this Admission. A non-empty MedLoCoMo Admission must produce at least one source-aligned Memory Node before graph commit.'}};
+  throw error;
 }
 
 async function repairInvalidSemanticStates(gateway,observation,extractorInput,result,validate){
@@ -335,6 +378,56 @@ function augmentExtractorCoverage(result,observation){
   Object.defineProperty(value,'support_bindings',{value:retainedBindings,enumerable:false});
   return{...result,value,trace:{...(result?.trace||{}),parsed_response:value,semantic_state_source_bindings:retainedBindings,coverage_ledger:{version:'careharness-visible-session-coverage-ledger.v4-complete-context-unit',policy:'supplement_only_uncited_high_value_complete_context_units',model_memory_node_count:sourceExtracted.length,model_duplicate_collapsed_count:deduplicated.collapsed,candidate_count:candidates.length,skipped_already_cited_context_unit_count:skippedCitedUnit,attached_source_fragment_count:attached,added_count:accepted.length,patient_added_count:accepted.filter(item=>item.source_type==='patient').length,doctor_added_count:accepted.filter(item=>item.source_type==='doctor').length,gold_or_judge_input_used:false}}};
 }
+
+// MedLoCoMo source evidence is an English dialogue whose individual Turns can
+// contain several independently useful facts. An extractor may cite one
+// Context Unit and omit another, while a failed semantic repair deliberately
+// discards its candidate. Preserve one exact, source-sliced fallback per
+// nonempty Turn after repair so those omitted words remain searchable.
+//
+// This supplement is code-generated from the visible Observation only. It
+// never joins Turns and still passes through the ordinary source-alignment gate
+// below, so it cannot make an ungrounded model node answer-eligible.
+function augmentMedLoCoMoSourceTurnCoverage(result,observation){
+  const existing=Array.isArray(result?.value)?result.value.map(node=>({...node,span:Array.isArray(node.span)?[...node.span]:node.span||null})):[],candidates=medLoCoMoSourceTurnFallbackCandidates(observation),added=[],skipped=[];
+  for(const candidate of candidates){
+    if(existing.some(node=>exactSourceTurnAlreadyRepresented(node,candidate,observation))){skipped.push(candidate);continue;}
+    added.push(candidate);
+  }
+  const value=[...existing,...added],priorBindings=result?.value?.support_bindings||[],fallbackBindings=added.map(node=>({memory_id:node.memory_id,support_unit_ids:[...(node.support_unit_ids||[])],binding_mode:'exact_source_turn',bound:true,failure_reasons:[]})),supportBindings=[...priorBindings,...fallbackBindings];
+  Object.defineProperty(value,'warnings',{value:[...(result?.value?.warnings||[])],enumerable:false});
+  Object.defineProperty(value,'support_bindings',{value:supportBindings,enumerable:false});
+  return{...result,value,trace:{...(result?.trace||{}),parsed_response:value,semantic_state_source_bindings:priorBindings,literal_provenance_source_bindings:fallbackBindings,medlocomo_source_turn_fallback:{version:'careharness-medlocomo-source-turn-fallback.v2-literal-provenance',policy:'supplement_every_nonempty_visible_turn_after_semantic_repair_before_source_alignment_gate',candidate_count:candidates.length,skipped_existing_literal_provenance_count:skipped.length,added_count:added.length,patient_added_count:added.filter(node=>node.source_type==='patient').length,doctor_added_count:added.filter(node=>node.source_type==='doctor').length,boundary_policy:'one_turn_role_time_block',source_text_policy:'exact_observation_slice',representation_policy:'retrievable_literal_provenance_not_semantic_clinical_state',gold_or_judge_input_used:false}}};
+}
+
+function medLoCoMoSourceTurnFallbackCandidates(observation){
+  const rawText=String(observation?.raw_text||''),blocks=transcriptBlocks(rawText),units=buildSemanticContextUnits(observation),unitsByBlock=new Map();
+  for(const unit of units){const values=unitsByBlock.get(unit.block_index)||[];values.push(unit);unitsByBlock.set(unit.block_index,values);}
+  const candidates=[];
+  blocks.forEach((block,index)=>{
+    let start=block.content_start,end=block.content_end;
+    while(start<end&&/\s/u.test(rawText[start]))start++;
+    while(end>start&&/\s/u.test(rawText[end-1]))end--;
+    const sourceText=rawText.slice(start,end);
+    if(!['patient','doctor'].includes(block.source_type)||!sourceText)return;
+    const context=transcriptContextForSpan(rawText,start,end);
+    if(!context||context.crosses_turn_boundary||context.source_type!==block.source_type||String(context.turn_id||'')!==String(block.turn_id||'')||String(context.event_time||'')!==String(block.event_time||''))return;
+    const supportUnitIds=(unitsByBlock.get(index)||[]).map(unit=>unit.unit_id);
+    candidates.push(validateExtractedMemoryNode({
+      memory_id:`${observation.observation_id}:source-turn:${index}`,observation_id:observation.observation_id,
+      subject_id:observation.subject_id,text:sourceText,source_text:sourceText,span:[start,end],
+      source_type:block.source_type,episode_id:observation.episode_id,turn_id:block.turn_id,event_time:block.event_time,
+      certainty:1,polarity:inferSemanticPolarity(sourceText),...(supportUnitIds.length?{support_unit_ids:supportUnitIds}:{}),construction_kind:'literal_provenance'
+    }));
+  });
+  return candidates;
+}
+
+function exactSourceTurnAlreadyRepresented(node,candidate,observation){
+  return node?.construction_kind==='literal_provenance'&&inspectMemoryNodeSourceAlignment(node,observation).aligned&&String(node?.source_type||'')===String(candidate.source_type||'')&&String(node?.turn_id||'')===String(candidate.turn_id||'')&&String(node?.event_time||'')===String(candidate.event_time||'')&&canonicalSourceTurnText(node?.text)===canonicalSourceTurnText(candidate.text);
+}
+
+function canonicalSourceTurnText(value){return String(value||'').normalize('NFKC').replace(/\r\n?/gu,'\n').replace(/[ \t\f\v]+/gu,' ').replace(/ *\n */gu,'\n').trim().toLowerCase();}
 
 function deduplicateExtractedMemoryNodes(nodes){
   const kept=[];let collapsed=0;
@@ -542,4 +635,4 @@ function diff(a,b){const aa=JSON.stringify(a)??'null',bb=JSON.stringify(b)??'nul
 function readMemoryGraphSnapshot(store,subjectId){for(let attempt=0;attempt<3;attempt++){const before=store.memoryGraphRevisionFor(subjectId),nodes=store.memoryNodesFor(subjectId),edges=store.memoryEdgesFor(subjectId),after=store.memoryGraphRevisionFor(subjectId);if(before===after)return{revision:after,nodes,edges};}throw new Error(`Memory Graph for ${subjectId} changed repeatedly while being read; retry the observation`);}
 function memoryCommitFailure(error){return{kind:/changed concurrently/i.test(String(error?.message||''))?'graph_revision_conflict':'memory_commit_error',message:String(error?.message||error),suggestion:/changed concurrently/i.test(String(error?.message||''))?'Retry this observation so graph versioning is recomputed from the latest patient revision.':'The Memory Graph transaction rolled back. Inspect Memory Node, Memory Edge, provenance and database constraints before retrying; no successful commit is claimed.'};}
 
-export const pipelineInternals={extractMemoryNodes,buildSemanticContextUnits,semanticExtractorInput,bindSemanticSupport,normalizeMemoryNodeOutput,normalizeMemoryTagsOutput,materializeEmptyMemoryTags,validateMemoryTags,locateContiguousQuote,tagMemoryNodes,tagMemoryWithFallback,updateMemoryGraph,currentMemory,actionPolicy,generateFromMemory,audit,augmentExtractorCoverage,coverageLedgerCandidates,quarantineUnalignedMemoryNodes,memoryTopicKey,inferSemanticPolarity};
+export const pipelineInternals={extractMemoryNodes,buildSemanticContextUnits,semanticExtractorInput,bindSemanticSupport,normalizeMemoryNodeOutput,normalizeMemoryTagsOutput,materializeEmptyMemoryTags,validateMemoryTags,locateContiguousQuote,tagMemoryNodes,tagMemoryWithFallback,updateMemoryGraph,currentMemory,actionPolicy,generateFromMemory,audit,augmentExtractorCoverage,augmentMedLoCoMoSourceTurnCoverage,medLoCoMoSourceTurnFallbackCandidates,coverageLedgerCandidates,quarantineUnalignedMemoryNodes,memoryTopicKey,inferSemanticPolarity};

@@ -61,7 +61,7 @@ export function validateMemoryNode(value) {
     if(!Array.isArray(value.support_unit_ids)||value.support_unit_ids.length===0||value.support_unit_ids.some(id=>typeof id!=='string'||!id.trim()))errors.push('support_unit_ids must be a non-empty string array when present');
     else if(new Set(value.support_unit_ids).size!==value.support_unit_ids.length)errors.push('support_unit_ids must not contain duplicates');
   }
-  if(value?.construction_kind!=null&&!['semantic','fallback'].includes(value.construction_kind))errors.push('construction_kind must be semantic or fallback when present');
+  if(value?.construction_kind!=null&&!['semantic','fallback','literal_provenance'].includes(value.construction_kind))errors.push('construction_kind must be semantic, fallback, or literal_provenance when present');
   if (!Array.isArray(value?.families) || value.families.length === 0) errors.push('memory node requires at least one family');
   else {
     const seen=new Set();
@@ -169,11 +169,13 @@ export function validateProviderConfig(value) {
   }
   if (value?.api_key || value?.apiKey) errors.push('raw API keys must be submitted separately and kept in server memory');
   if (value?.temperature != null && (value.temperature < 0 || value.temperature > 2)) errors.push('temperature must be 0..2');
+  if (value?.enable_thinking != null && typeof value.enable_thinking !== 'boolean') errors.push('enable_thinking must be boolean');
   if (value?.seed != null && (!Number.isInteger(Number(value.seed)) || Number(value.seed) < 0 || Number(value.seed) > 2147483647)) errors.push('seed must be an integer from 0 to 2147483647');
   if (errors.length) throw new SchemaError('ProviderConfig', errors, value);
   return {
     provider: value.provider, base_url: value.base_url || '', model: value.model,
     api_key_ref: value.api_key_ref || '', temperature: value.temperature ?? 0, seed: value.seed == null ? 42 : Number(value.seed),
+    enable_thinking: value.enable_thinking ?? (value.provider === 'dashscope' ? false : null),
     max_tokens: value.max_tokens ?? 1200, timeout_ms: value.timeout_ms ?? 30000,
     retries: value.retries ?? 1, capabilities: value.capabilities || ['json'], context_length: value.context_length ?? null
   };

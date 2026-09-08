@@ -15,7 +15,31 @@ test('gateway also increases an explicit component budget after length truncatio
   try{const result=await gateway.completeJSON('careharness_evaluate',{question:'测试'},value=>value,()=>({}),{maxTokens:3000,extractJsonObject:true});assert.deepEqual(budgets,[3000,6000]);assert.equal(result.value.assessment,'supported');assert.equal(result.trace.requested_max_tokens,6000)}finally{globalThis.fetch=originalFetch}
 });
 
+test('gateway supports a call-scoped structured-output retry limit without changing the model default',async()=>{
+  const gateway=new ModelGateway({provider:'openai-compatible',base_url:'https://provider.test/v1',model:'test-model',max_tokens:1200,retries:0},{apiKey:'memory-key'}),originalFetch=globalThis.fetch;let calls=0;
+  globalThis.fetch=async()=>{calls++;return new Response(JSON.stringify({choices:[{message:{content:calls<3?'[]':'{"ok":true}'},finish_reason:'stop'}]}),{status:200})};
+  try{
+    const result=await gateway.completeJSON('careharness_evaluate',{question:'test'},value=>{if(!value?.ok)throw new Error('one JSON object required');return value},()=>({ok:true}),{extractJsonObject:true,maxRetries:2});
+    assert.equal(calls,3);assert.equal(result.value.ok,true);assert.equal(result.trace.retries,2);assert.equal(result.trace.retry_limit,2);assert.equal(result.trace.raw_model_attempts.length,3);
+  }finally{globalThis.fetch=originalFetch}
+});
+
+test('gateway does not expose schema-invalid JSON as a validated parsed response',async()=>{
+  const gateway=new ModelGateway({provider:'openai-compatible',base_url:'https://provider.test/v1',model:'test-model',retries:0},{apiKey:'memory-key'}),originalFetch=globalThis.fetch,raw='{"worker":"answer","instruction":{"answer":"model guess"}}';
+  globalThis.fetch=async()=>new Response(JSON.stringify({choices:[{message:{content:raw},finish_reason:'stop'}]}),{status:200});
+  try{
+    await assert.rejects(()=>gateway.completeJSON('careharness_evaluate',{question:'test'},()=>{throw new Error('Forbidden post-answer field')},()=>({})),error=>{
+      assert.equal(error.gatewayTrace.parsed_response,null);
+      assert.equal(error.gatewayTrace.raw_model_response,raw);
+      assert.match(error.gatewayTrace.error.message,/Forbidden post-answer field/);
+      return true;
+    });
+  }finally{globalThis.fetch=originalFetch}
+});
+
 test('DashScope requests disable thinking and send the configured deterministic seed',async()=>{const gateway=new ModelGateway({provider:'dashscope',base_url:'https://dashscope.aliyuncs.com/compatible-mode/v1',model:'qwen3.7-flash',seed:73,retries:0},{apiKey:'dashscope-key'}),originalFetch=globalThis.fetch;let request;globalThis.fetch=async(_url,options)=>{request=JSON.parse(options.body);return new Response(JSON.stringify({choices:[{message:{content:'{"ok":true}'},finish_reason:'stop'}]}),{status:200})};try{const result=await gateway.completeJSON('judge',{question:'测试'},value=>value,()=>({ok:true}));assert.equal(result.value.ok,true);assert.equal(request.enable_thinking,false);assert.equal(request.seed,73);assert.equal(request.model,'qwen3.7-flash');assert.equal(request.max_tokens,1200);assert.equal(Object.hasOwn(request,'max_completion_tokens'),false)}finally{globalThis.fetch=originalFetch}});
+
+test('OpenAI-compatible Qwen can explicitly disable thinking',async()=>{const gateway=new ModelGateway({provider:'openai-compatible',base_url:'https://closeai.test/v1',model:'qwen3.5-plus',enable_thinking:false,retries:0},{apiKey:'closeai-key'}),originalFetch=globalThis.fetch;let request;globalThis.fetch=async(_url,options)=>{request=JSON.parse(options.body);return new Response(JSON.stringify({choices:[{message:{content:'{"ok":true}'},finish_reason:'stop'}]}),{status:200})};try{await gateway.completeJSON('judge',{question:'测试'},value=>value,()=>({ok:true}));assert.equal(request.enable_thinking,false);assert.equal(gateway.publicConfig().enable_thinking,false)}finally{globalThis.fetch=originalFetch}});
 
 test('GPT-5.1 connection test uses max_completion_tokens without changing the configured budget',async()=>{
   const gateway=new ModelGateway({provider:'openai-compatible',base_url:'https://api.openai-proxy.org/v1',model:'gpt-5.1',max_tokens:1200,retries:0},{apiKey:'closeai-key'}),originalFetch=globalThis.fetch;let request;

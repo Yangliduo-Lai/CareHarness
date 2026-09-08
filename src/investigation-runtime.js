@@ -18,13 +18,24 @@ export async function runInvestigation({request,initial_snapshot={},policy,worke
     const capabilities=Object.fromEntries(allowedWorkers.map(name=>[name,registry.get(name).capability])),input=policyView(state,{allowed_workers:allowedWorkers,worker_capabilities:capabilities,remaining_budget:budget-turn+1}),validate=value=>typeof decision_validator==='function'?decision_validator(value,input):validateInvestigationDecision(value,{allowed_workers:allowedWorkers});let decision,policyTrace=null,fallbackUsed=false,error=null;
     try{const response=await policy(input);decision=validate(response?.value??response);policyTrace=response?.trace||null;}
     catch(cause){if(typeof fallback_decision!=='function')throw cause;decision=validate(await fallback_decision(input,cause));policyTrace=cause?.gatewayTrace||null;fallbackUsed=true;error=String(cause?.message||cause);}
-    const result=normalizeWorkerResult(await registry.get(decision.worker).run({request:state.request,state,decision,instruction:decision.instruction,turn,remaining_budget:budget-turn}));
-    const record={turn,decision,result,policy_trace:policyTrace,fallback_used:fallbackUsed,error,...(input.learned_action_prior?{learned_action_prior:input.learned_action_prior}:{}),...(input.action_exploration_assignment?{action_exploration_assignment:input.action_exploration_assignment}:{})};
+    const workerResult=normalizeWorkerResult(await registry.get(decision.worker).run({request:state.request,state,decision,instruction:decision.instruction,turn,remaining_budget:budget-turn})),result=decision.investigation_focus?{...workerResult,snapshot:{...workerResult.snapshot,investigation_focus:mergeInvestigationFocus(decision.investigation_focus,workerResult.snapshot)}}:workerResult;
+    // `changed` is a worker-level progress signal and is deliberately broader
+    // than a packet mutation (Assess and Verify may report changed=true).  Keep
+    // a separate revision signal so a semantic assessment can never be reused
+    // after Search/Context/Trace/Refine or final Answer selection changed the
+    // actual nodes/edges that will be shown to the answer model.
+    const packetChanged=packetSignature(state.snapshot)!==packetSignature(result.snapshot),priorRuntime=state.history.at(-1)?.runtime_state||{},assessmentProduced=decision.worker==='assess'&&isObject(result.snapshot?.assessment),verificationProduced=['verify','answer'].includes(decision.worker)&&isObject(result.snapshot?.verification),runtimeState={packet_changed:packetChanged,semantic_assessment_attempted:decision.worker==='assess',semantic_assessment_fresh:assessmentProduced||(!packetChanged&&priorRuntime.semantic_assessment_fresh===true),source_verification_fresh:verificationProduced||(!packetChanged&&priorRuntime.source_verification_fresh===true)};
+    const record={turn,decision,result,runtime_state:runtimeState,policy_trace:policyTrace,fallback_used:fallbackUsed,error,...(input.learned_action_prior?{learned_action_prior:input.learned_action_prior}:{}),...(input.action_exploration_assignment?{action_exploration_assignment:input.action_exploration_assignment}:{})};
     const history=[...state.history,record];state=createInvestigationState({request:state.request,snapshot:result.snapshot,history});
     if(typeof on_turn==='function')await on_turn({state,record,input});
     terminated=result.terminal===true||decision.worker==='answer';
   }
   return{state,history:state.history,terminated,termination_reason:state.history.at(-1)?.decision.worker==='answer'?'answer_selected':state.history.at(-1)?.result.terminal===true?'worker_terminal':'budget_exhausted'};
+}
+
+function mergeInvestigationFocus(decisionFocus,snapshot={}){
+  const assessed=snapshot.investigation_focus||{},coverage=snapshot.coverage_state||{};
+  return{...decisionFocus,...(assessed.covered_roles||coverage.covered_aspects?{covered_roles:assessed.covered_roles||coverage.covered_aspects}:{}),...(assessed.missing_roles||coverage.missing_aspects?{missing_roles:assessed.missing_roles||coverage.missing_aspects}:{}),...(assessed.stop_condition?{stop_condition:assessed.stop_condition}:{})};
 }
 
 function normalizeWorker(name,value){
@@ -38,3 +49,9 @@ function normalizeWorkerResult(value){
   if(!value||typeof value!=='object'||Array.isArray(value))throw new Error('investigation worker must return one result object');
   return{snapshot:value.snapshot&&typeof value.snapshot==='object'?value.snapshot:{},summary:String(value.summary||'').normalize('NFKC').trim().slice(0,500),changed:value.changed!==false,terminal:value.terminal===true,trace:value.trace||null};
 }
+
+function packetSignature(snapshot={}){
+  const nodes=(Array.isArray(snapshot?.memory_nodes)?snapshot.memory_nodes:[]).map(node=>String(node?.memory_id||'')).filter(Boolean).sort(),edges=(Array.isArray(snapshot?.memory_edges)?snapshot.memory_edges:[]).map(edge=>String(edge?.edge_id||`${edge?.from_memory_id||''}>${edge?.to_memory_id||''}:${edge?.relation_type||''}`)).filter(Boolean).sort();
+  return JSON.stringify([nodes,edges]);
+}
+function isObject(value){return Boolean(value&&typeof value==='object'&&!Array.isArray(value));}

@@ -31,7 +31,8 @@ function deduplicateRouteFamilies(families,memoryNode,{routeIndex,routeId,warnin
 
 export function attachRouterWarnings(result){if(result?.value?.warnings?.length&&result.trace)result.trace.validation_warnings=result.value.warnings;return result;}
 
-export async function tagMemoryWithFallback(gateway,input,memoryNodes,observation){
+export async function tagMemoryWithFallback(gateway,input,memoryNodes,observation,options={}){
+  if(options.per_batch_fail_open===true||options.deterministic_literal_provenance===true)return tagMemoryWithBoundedBatchFallback(gateway,input,memoryNodes,observation,options);
   try{
     if(memoryNodes.length<=ROUTER_BATCH_SIZE)return await gateway.completeJSON('router',input,value=>validateMemoryTags(materializeEmptyMemoryTags(normalizeMemoryTagsOutput(value,memoryNodes),memoryNodes),memoryNodes),()=>tagMemoryNodes(memoryNodes,observation));
     const batches=[];
@@ -54,6 +55,51 @@ export async function tagMemoryWithFallback(gateway,input,memoryNodes,observatio
     return{value:fallback,trace:{...(gatewayTrace||{}),component:'router',model_input:input,parsed_response:fallback,error:null,fallback_used:true,model_validation_error:gatewayTrace?.error||{kind:'router_error',message:String(error?.message||error)},validation_warnings:warnings}};
   }
 }
+
+async function tagMemoryWithBoundedBatchFallback(gateway,input,memoryNodes,observation,options){
+  const routes=new Array(memoryNodes.length),warnings=[],modelEntries=[];let literalProvenanceCount=0;
+  for(let index=0;index<memoryNodes.length;index++){
+    const node=memoryNodes[index];
+    if(options.deterministic_literal_provenance===true&&node?.construction_kind==='literal_provenance'){
+      routes[index]=tagMemoryNodes([node],observation)[0];literalProvenanceCount++;
+      warnings.push({warning_type:'literal_provenance_family_tags_materialized',route_index:index,route_id:String(index),memory_id:node.memory_id,families:[...routes[index].families],selection_basis:'deterministic_source_attributed_taxonomy_no_llm'});
+    }else modelEntries.push({index,node,input:input[index]});
+  }
+  const batches=[];
+  for(let offset=0;offset<modelEntries.length;offset+=ROUTER_BATCH_SIZE)batches.push({batch_index:batches.length,entries:modelEntries.slice(offset,offset+ROUTER_BATCH_SIZE)});
+  const concurrency=boundedInteger(options.bounded_batch_concurrency,1,8,3),completed=await mapWithConcurrency(batches,concurrency,async batch=>{
+    const batchMemory=batch.entries.map(entry=>entry.node),batchInput=batch.entries.map(entry=>entry.input);
+    try{
+      const result=await gateway.completeJSON('router',batchInput,value=>validateMemoryTags(materializeEmptyMemoryTags(normalizeMemoryTagsOutput(value,batchMemory),batchMemory),batchMemory),()=>tagMemoryNodes(batchMemory,observation));
+      return{...batch,value:result.value,trace:result.trace,failed:false};
+    }catch(error){
+      const value=validateMemoryTags(tagMemoryNodes(batchMemory,observation),batchMemory),gatewayTrace=error?.gatewayTrace||null;
+      return{...batch,value,trace:gatewayTrace,failed:true,error:gatewayTrace?.error||{kind:'router_error',message:String(error?.message||error)}};
+    }
+  });
+  for(const batch of completed){
+    batch.entries.forEach((entry,localIndex)=>{routes[entry.index]=batch.value[localIndex];});
+    warnings.push(...(batch.value?.warnings||[]).map(warning=>remapBatchWarning(warning,batch.entries)));
+    if(batch.failed)warnings.push({warning_type:'router_model_output_batch_fallback',batch_index:batch.batch_index,route_indexes:batch.entries.map(entry=>entry.index),memory_ids:batch.entries.map(entry=>entry.node.memory_id),fallback_policy:'deterministic_multi_family_memory_tagger_for_failed_batch_only',failure_kind:batch.error?.kind||'router_error',message:String(batch.error?.message||'router batch failed')});
+  }
+  Object.defineProperty(routes,'warnings',{value:warnings,enumerable:false});
+  validateMemoryTags(routes,memoryNodes);
+  const failed=completed.filter(batch=>batch.failed),traces=completed.map(batch=>batch.trace).filter(Boolean),trace=mergeRouterBatchTraces(traces,input,routes);
+  return{value:routes,trace:{...trace,component:'router',model_input:input,parsed_response:routes,error:null,fallback_used:failed.length>0,router_batch_size:ROUTER_BATCH_SIZE,router_batch_count:batches.length,router_batch_concurrency:batches.length?Math.min(concurrency,batches.length):0,router_successful_batch_count:batches.length-failed.length,router_failed_batch_count:failed.length,router_failed_batch_indexes:failed.map(batch=>batch.batch_index),literal_provenance_count:literalProvenanceCount,literal_provenance_routing:'deterministic_no_llm',batch_failure_policy:'failed_batch_only',validation_warnings:warnings}};
+}
+
+async function mapWithConcurrency(items,concurrency,fn){
+  const output=new Array(items.length);let next=0;
+  const workers=Array.from({length:Math.min(concurrency,items.length)},async()=>{while(true){const index=next++;if(index>=items.length)return;output[index]=await fn(items[index],index);}});
+  await Promise.all(workers);return output;
+}
+
+function remapBatchWarning(warning,entries){
+  const local=Number(warning?.route_index),entry=Number.isInteger(local)?entries[local]:null;
+  return entry?{...warning,route_index:entry.index,route_id:String(entry.index),memory_id:entry.node.memory_id}:{...warning};
+}
+
+function boundedInteger(value,min,max,fallback){const number=Number(value);return Number.isInteger(number)?Math.max(min,Math.min(max,number)):fallback;}
 
 function mergeRouterBatchTraces(traces,input,routes){
   const first=traces[0]||{},sum=key=>traces.reduce((total,trace)=>total+Number(trace?.[key]||0),0);

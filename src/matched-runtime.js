@@ -6,10 +6,13 @@ import { runInvestigation } from './investigation-runtime.js';
 import { createMemoryInvestigationWorkers,deriveQuestionTemporalGate } from './investigation-workers.js';
 import { PROMPTS } from './prompts.js';
 import { assertStaticCareHarnessMode,positiveInteger } from './matched-utils.js';
-import { explicitDatesInText as datesInPolicyText,explicitMonthsInText as monthsInPolicyText } from './temporal-expressions.js';
+import { canonicalCalendarDate as canonicalPolicyDate,canonicalCalendarMonth,explicitDatesInText as datesInPolicyText,explicitMonthsInText as monthsInPolicyText } from './temporal-expressions.js';
 import { MEDMEMORY_MATCHED_RUNTIME_VERSION } from './medmemory-policy.js';
+import { loadMedLoCoMoInstructionPolicy,medLoCoMoSearchInstructionPrior } from './medlocomo-instruction-policy.js';
+import { buildMedLoCoMoAdmissionOverview,buildMedLoCoMoEvidenceLedger,buildMedLoCoMoRoleCoverage } from './medlocomo-evidence-ledger.js';
 
 const RELATION_EVALUATOR_CALL_BUDGET=2;
+const MEDLOCOMO_RELATION_EVALUATOR_CALL_BUDGET=3;
 
 /**
  * Synchronous diagnostic path for an explicitly supplied worker instruction.
@@ -27,22 +30,24 @@ export function buildDiagnosticInvestigationContext({evaluation_mode=MATCHED_EVA
  * policy selects a worker. A deterministic calendar gate may be attached to
  * state solely to make an explicit date in the original question enforceable.
  */
-export async function buildAdaptiveInvestigationContext({evaluation_mode=MATCHED_EVALUATION_MODE,item,question_request,patient_profile=null,recent_sessions=[],memory_nodes=[],memory_edges=[],candidate_budget=24,investigation_budget=6,state_projection=false,relation_evaluator,embedding_retriever,investigation_policy}={}){
+export async function buildAdaptiveInvestigationContext({evaluation_mode=MATCHED_EVALUATION_MODE,item,question_request,patient_profile=null,recent_sessions=[],memory_nodes=[],memory_edges=[],initial_memory_nodes=[],initial_memory_edges=[],initial_context_trace=null,admission_overview=null,candidate_budget=24,investigation_budget=6,state_projection=false,relation_evaluator,embedding_retriever,search_ranker,search_instruction_prior=undefined,investigation_policy}={}){
   assertStaticCareHarnessMode(evaluation_mode);
   const request=createQuestionRequest(question_request||item||'');
   if(typeof investigation_policy!=='function')return buildDiagnosticInvestigationContext({evaluation_mode,item,question_request:request,instruction:{},memory_nodes,memory_edges,candidate_budget});
-  assertNoHiddenRuntimeInput({request,patient_profile,recent_sessions,memory_nodes,memory_edges});
-  const strategy=request.strategy_profile||null,candidateLimit=positiveInteger(candidate_budget,'candidate_budget'),profileAnswerLimit=strategy?.answer_memory_limit!=null?positiveInteger(strategy.answer_memory_limit,'strategy answer_memory_limit'):null,answerFocusLimit=strategy?.answer_focus_limit!=null?positiveInteger(strategy.answer_focus_limit,'strategy answer_focus_limit'):16,answerLimit=profileAnswerLimit!=null?Math.min(candidateLimit,profileAnswerLimit):state_projection?candidateLimit:Math.min(candidateLimit,16),temporalGate=deriveQuestionTemporalGate(request),allowReasoningHypotheses=strategy?strategy.reasoning_hypotheses===true:!state_projection&&!asksForDirectFact(request.question),targetOnly=strategy?.target_only_assessment===true,exactEntity=request.query_type==='entity_exact_match'||strategy?.strategy_id==='exact_entity';
+  assertNoHiddenRuntimeInput({request,patient_profile,recent_sessions,memory_nodes,memory_edges,initial_memory_nodes,initial_memory_edges,admission_overview});
+  const availableMemoryNodes=mergeById(memory_nodes,initial_memory_nodes,'memory_id'),availableMemoryEdges=mergeById(memory_edges,initial_memory_edges,'edge_id'),admissionOverview=request.strategy_namespace==='medlocomo'?(admission_overview||buildMedLoCoMoAdmissionOverview(availableMemoryNodes)):null;
+  const strategy=request.strategy_profile||null,requestedCandidateLimit=positiveInteger(candidate_budget,'candidate_budget'),medLoCoMo=request.strategy_namespace==='medlocomo',candidateLimit=medLoCoMo?Math.max(48,requestedCandidateLimit):requestedCandidateLimit,profileAnswerLimit=strategy?.answer_memory_limit!=null?positiveInteger(strategy.answer_memory_limit,'strategy answer_memory_limit'):null,answerFocusLimit=strategy?.answer_focus_limit!=null?positiveInteger(strategy.answer_focus_limit,'strategy answer_focus_limit'):16,answerLimit=medLoCoMo?Math.min(32,profileAnswerLimit||32):profileAnswerLimit!=null?Math.min(candidateLimit,profileAnswerLimit):state_projection?candidateLimit:Math.min(candidateLimit,16),temporalGate=deriveQuestionTemporalGate(request),learnedSearchInstructionPrior=resolveMedLoCoMoSearchInstructionPrior(request,search_instruction_prior),allowReasoningHypotheses=strategy?strategy.reasoning_hypotheses===true:!state_projection&&!asksForDirectFact(request.question),targetOnly=strategy?.target_only_assessment===true,exactEntity=request.query_type==='entity_exact_match'||strategy?.strategy_id==='exact_entity';
+  const relationEvaluatorCallBudget=request.strategy_namespace==='medlocomo'?MEDLOCOMO_RELATION_EVALUATOR_CALL_BUDGET:RELATION_EVALUATOR_CALL_BUDGET;
   let relationEvaluatorCalls=0;
   const budgetedRelationEvaluator=typeof relation_evaluator==='function'?async input=>{
-    if(relationEvaluatorCalls>=RELATION_EVALUATOR_CALL_BUDGET)throw new Error(`relation evaluator call budget exceeded (${RELATION_EVALUATOR_CALL_BUDGET})`);
+    if(relationEvaluatorCalls>=relationEvaluatorCallBudget)throw new Error(`relation evaluator call budget exceeded (${relationEvaluatorCallBudget})`);
     relationEvaluatorCalls++;return relation_evaluator(input);
   }:relation_evaluator;
-  const workers=createMemoryInvestigationWorkers({question_request:request,memory_nodes,memory_edges,candidate_budget:candidateLimit,answer_memory_limit:answerLimit,answer_focus_limit:answerFocusLimit,relation_evaluator:budgetedRelationEvaluator,embedding_retriever,temporal_gate:temporalGate,allow_reasoning_hypotheses:allowReasoningHypotheses,target_only_focus_roles:targetOnly,exact_entity:exactEntity,conservative_refine:state_projection});
+  const workers=createMemoryInvestigationWorkers({question_request:request,memory_nodes:availableMemoryNodes,memory_edges:availableMemoryEdges,candidate_budget:candidateLimit,search_candidate_limit:medLoCoMo?32:candidateLimit,context_candidate_limit:medLoCoMo?64:candidateLimit,assess_memory_limit:medLoCoMo?48:candidateLimit,answer_memory_limit:answerLimit,answer_focus_limit:answerFocusLimit,relation_evaluator:budgetedRelationEvaluator,embedding_retriever,search_ranker:medLoCoMo?search_ranker:null,search_instruction_prior:learnedSearchInstructionPrior,temporal_gate:temporalGate,allow_reasoning_hypotheses:allowReasoningHypotheses,target_only_focus_roles:targetOnly,exact_entity:exactEntity,conservative_refine:state_projection,evidence_preserving_refine:medLoCoMo,structured_evidence_ledger:medLoCoMo});
   workers.answer=instrumentAnswerWorker(workers.answer,answerLimit);
-  const disabled=new Set(array(strategy?.disabled_workers).map(String)),workerNames=Object.keys(workers).filter(name=>!disabled.has(name)),budget=positiveInteger(investigation_budget,'investigation_budget')+1;
-  const outcome=await runInvestigation({request,initial_snapshot:emptySnapshot(patient_profile,recent_sessions,temporalGate,state_projection,strategy),policy:investigation_policy,workers,budget,allowed_workers:({state,remaining_budget})=>availableWorkers(workerNames,state.snapshot,remaining_budget,answerLimit,state.history,request,{conservative_refine:state_projection,relation_evaluator_call_budget:RELATION_EVALUATOR_CALL_BUDGET}),fallback_decision:(input,cause)=>fallback_decision(input,cause,answerLimit),decision_validator:(value,input)=>validateInvestigationPolicyDecision(value,input)});
-  return finalizeContext({evaluation_mode,request,snapshot:outcome.state.snapshot,history:outcome.history,termination_reason:outcome.termination_reason});
+  const disabled=new Set(array(strategy?.disabled_workers).map(String)),workerNames=Object.keys(workers).filter(name=>!disabled.has(name)),requestedBudget=positiveInteger(investigation_budget,'investigation_budget')+1,crossAdmissionComparison=isMedLoCoMoCrossAdmissionComparison(request),budget=crossAdmissionComparison?Math.max(5,requestedBudget):request.strategy_namespace==='medlocomo'?Math.max(5,requestedBudget):request.query_type==='frequency_pattern'?Math.max(3,requestedBudget):requestedBudget;
+  const outcome=await runInvestigation({request,initial_snapshot:emptySnapshot(patient_profile,recent_sessions,temporalGate,state_projection,strategy,initial_memory_nodes,initial_memory_edges,initial_context_trace,learnedSearchInstructionPrior,admissionOverview),policy:investigation_policy,workers,budget,allowed_workers:({state,remaining_budget})=>availableInvestigationWorkers(workerNames,state.snapshot,remaining_budget,answerLimit,state.history,request,{conservative_refine:state_projection,relation_evaluator_call_budget:relationEvaluatorCallBudget,candidate_budget:candidateLimit}),fallback_decision:(input,cause)=>fallback_decision(input,cause,answerLimit),decision_validator:(value,input)=>validateInvestigationPolicyDecision(value,input)});
+  return finalizeContext({evaluation_mode,request,snapshot:outcome.state.snapshot,history:outcome.history,termination_reason:outcome.termination_reason,relation_evaluator_call_budget:relationEvaluatorCallBudget});
 }
 
 export function validateInvestigationPolicyDecision(value,input={}){
@@ -96,10 +101,73 @@ function fallbackForWorker(worker,input,candidateLimit,rationale,alternate=false
   return{worker,information_status,instruction,rationale};
 }
 
-function availableWorkers(workerNames,snapshot,remainingBudget,answerLimit,history=[],request={},options={}){
-  const conservativeRefine=options.conservative_refine===true,nodes=array(snapshot.memory_nodes),hasMemory=nodes.length>0,hasRecent=array(snapshot.recent_sessions).length>0,hasProfile=Number(snapshot.patient_profile?.item_count||0)>0,hasInformation=hasMemory||hasRecent||hasProfile,verified=snapshot.verification?.complete===true,assessment=snapshot.assessment,missing=array(assessment?.missing_information).filter(Boolean),assessmentSettled=assessment?.assessment==='supported'&&missing.length===0,visibleIds=nodes.map(node=>String(node?.memory_id||'')).filter(Boolean),selectedIds=semanticSelectionIds(snapshot,visibleIds),semanticRefine=Boolean(!conservativeRefine&&assessmentSettled&&selectedIds.length&&selectedIds.length<visibleIds.length),overflow=nodes.length>answerLimit||snapshot.verification?.requires_refine===true,needsRefine=overflow||semanticRefine,answerAvailable=workerNames.includes('answer'),lastWorker=String(snapshot.worker_state?.last_worker||''),freshEvidence=['search','context','trace'].includes(lastWorker),noProgressDiscoveryStreak=countNoProgressDiscoveryStreak(history),relativeGate=snapshot.temporal_gate?.hard===true&&snapshot.temporal_gate?.kind==='relative_documentation_window',lastSearchHits=Number(snapshot.worker_state?.trace?.selected_memory_count||0)>0;
-  const relationBudget=Math.max(0,Number(options.relation_evaluator_call_budget)||0),relationCalls=array(history).filter(record=>record?.decision?.worker==='assess').length;
+export function availableInvestigationWorkers(workerNames,snapshot,remainingBudget,answerLimit,history=[],request={},options={}){
+  const conservativeRefine=options.conservative_refine===true,medLoCoMo=request?.strategy_namespace==='medlocomo',frequencyEnumeration=String(request?.query_type||'')==='frequency_pattern',crossAdmissionComparison=isMedLoCoMoCrossAdmissionComparison(request),nodes=array(snapshot.memory_nodes),hasMemory=nodes.length>0,hasRecent=array(snapshot.recent_sessions).length>0,hasProfile=Number(snapshot.patient_profile?.item_count||0)>0,hasInformation=hasMemory||hasRecent||hasProfile,verified=snapshot.verification?.complete===true,assessment=snapshot.assessment,missing=array(assessment?.missing_information).filter(Boolean),assessmentSettled=assessment?.assessment==='supported'&&missing.length===0,visibleIds=nodes.map(node=>String(node?.memory_id||'')).filter(Boolean),selectedIds=semanticSelectionIds(snapshot,visibleIds),semanticRefine=Boolean(!frequencyEnumeration&&!conservativeRefine&&assessmentSettled&&selectedIds.length&&selectedIds.length<visibleIds.length),overflow=nodes.length>answerLimit||snapshot.verification?.requires_refine===true,needsRefine=overflow||semanticRefine,answerAvailable=workerNames.includes('answer'),lastWorker=String(snapshot.worker_state?.last_worker||''),freshEvidence=['search','context','trace'].includes(lastWorker),noProgressDiscoveryStreak=countNoProgressDiscoveryStreak(history),relativeGate=snapshot.temporal_gate?.hard===true&&snapshot.temporal_gate?.kind==='relative_documentation_window',lastSearchHits=Number(snapshot.worker_state?.trace?.selected_memory_count||0)>0;
+  const relationBudget=Math.max(0,Number(options.relation_evaluator_call_budget)||0),relationCalls=array(history).filter(record=>record?.decision?.worker==='assess').length,assessmentFresh=semanticAssessmentIsFresh(snapshot,history),verificationFresh=sourceVerificationIsFresh(snapshot,history);
   if(relationBudget&&relationCalls>=relationBudget)workerNames=workerNames.filter(name=>name!=='assess');
+  const searchDone=array(history).some(record=>record?.decision?.worker==='search'),canAssess=relationCalls<relationBudget&&workerNames.includes('assess');
+  // Unlike a Patient Profile or recent-session view, an empty MedLoCoMo
+  // historical packet has nothing for the semantic assessor to align. Spend
+  // the first turn on discovery instead of consuming one of the three
+  // assessor calls on an empty packet.
+  if(medLoCoMo&&!hasMemory&&!searchDone&&workerNames.includes('search'))return['search'];
+  if(medLoCoMo){
+    // Selection must precede the final semantic assessment. Reserve four turns
+    // when Refine is still required; otherwise the final three turns are
+    // Assess -> Verify -> Answer. No discovery is admitted inside that final
+    // three-turn window, so a last Search can no longer erase the role table.
+    if(remainingBudget===4&&needsRefine&&workerNames.includes('refine'))return['refine'];
+    if(remainingBudget<=3){
+      if(!assessmentFresh&&canAssess&&remainingBudget>=2)return['assess'];
+      if(!verificationFresh&&workerNames.includes('verify')&&remainingBudget>=2)return['verify'];
+      if(answerAvailable)return['answer'];
+      return workerNames.filter(name=>name==='assess'||name==='verify');
+    }
+    // Once the assessor allowance is exhausted, further discovery could only
+    // create an unassessed packet. Close the current packet instead. If an
+    // earlier buggy/custom sequence already made it stale, final readiness is
+    // reported false by finalizeContext rather than pretending structural
+    // verification supplied semantic coverage.
+    if(relationBudget&&relationCalls>=relationBudget){
+      if(!verificationFresh&&workerNames.includes('verify'))return['verify'];
+      if(answerAvailable)return['answer'];
+    }
+  }
+  // Frequency Pattern needs an actual full-history discovery pass and a
+  // semantic event check. A non-empty <=limit packet is not evidence that all
+  // occurrences were enumerated, so it must not jump straight to Verify.
+  if(frequencyEnumeration&&!searchDone&&workerNames.includes('search'))return['search'];
+  if(frequencyEnumeration&&hasMemory&&!assessmentFresh&&canAssess)return['assess'];
+  if(crossAdmissionComparison){
+    const comparisonReady=assessmentFresh&&crossAdmissionComparisonAssessmentReady(snapshot);
+    // A preloaded patient-distilled packet is only a candidate packet. The
+    // semantic assessor must align the same requested factor across Admissions
+    // before deterministic verification or Answer can freeze it.
+    if(!assessmentFresh&&canAssess)return['assess'];
+    if(comparisonReady){
+      if(needsRefine&&remainingBudget>=3&&workerNames.includes('refine'))return['refine'];
+      if(!verified&&workerNames.includes('verify'))return['verify'];
+      if(answerAvailable)return['answer'];
+    }
+    // When one comparison endpoint remains undocumented after the mandatory
+    // alignment attempt, freeze the best admission-diverse source packet
+    // instead of suppressing an answer at the hard budget edge.
+    if(remainingBudget<=1&&answerAvailable)return['answer'];
+    if(freshEvidence&&canAssess)return['assess'];
+    const discovery=['search','context','trace'].filter(name=>workerNames.includes(name));
+    if(lastWorker==='assess'&&discovery.length)return discovery;
+    if(canAssess)return['assess'];
+    const recovery=[...discovery,...(hasMemory?['refine','verify']:[])].filter((name,index,items)=>workerNames.includes(name)&&items.indexOf(name)===index);
+    return recovery;
+  }
+  if(medLoCoMo&&assessmentFresh&&assessment&&!assessmentSettled&&remainingBudget>3){
+    const discovery=['search','context','trace'].filter(name=>workerNames.includes(name));
+    if(discovery.length)return discovery;
+  }
+  // A changed MedLoCoMo packet invalidates its role table. Re-assess the new
+  // source set before Verify/Answer so a newly retrieved decisive endpoint is
+  // not silently replaced by the previous assessment handoff.
+  if(medLoCoMo&&freshEvidence&&!assessmentFresh&&remainingBudget>=2&&canAssess)return['assess'];
   // The last budgeted turn always freezes the best available information.
   // An incomplete investigation is preferable to suppressing the answer.
   if(remainingBudget<=1&&answerAvailable)return['answer'];
@@ -130,14 +198,28 @@ function availableWorkers(workerNames,snapshot,remainingBudget,answerLimit,histo
 }
 function countDiscoveryRunsSinceAssessment(history){let count=0;for(let index=array(history).length-1;index>=0;index--){const worker=String(history[index]?.decision?.worker||'');if(worker==='assess')break;if(['search','context','trace'].includes(worker))count++;}return count;}
 function countNoProgressDiscoveryStreak(history){let count=0;for(let index=array(history).length-1;index>=0;index--){const record=history[index],worker=String(record?.decision?.worker||'');if(!['search','context','trace'].includes(worker)||record?.result?.changed!==false)break;count++;}return count;}
+function semanticAssessmentIsFresh(snapshot,history=[]){
+  const recorded=array(history).at(-1)?.runtime_state?.semantic_assessment_fresh;if(typeof recorded==='boolean')return recorded;
+  if(!snapshot?.assessment)return false;
+  const lastAssessment=array(history).findLastIndex(record=>record?.decision?.worker==='assess');if(lastAssessment<0)return true;
+  return!array(history).slice(lastAssessment+1).some(record=>packetMutated(record));
+}
+function sourceVerificationIsFresh(snapshot,history=[]){
+  const recorded=array(history).at(-1)?.runtime_state?.source_verification_fresh;if(typeof recorded==='boolean')return recorded;
+  if(!snapshot?.verification)return false;
+  const lastVerification=array(history).findLastIndex(record=>['verify','answer'].includes(record?.decision?.worker));if(lastVerification<0)return true;
+  return!array(history).slice(lastVerification+1).some(record=>packetMutated(record));
+}
+function packetMutated(record){return record?.runtime_state?.packet_changed===true||(['search','context','trace','refine','answer'].includes(String(record?.decision?.worker||''))&&record?.result?.changed===true);}
 function asksForDirectFact(value){const text=String(value||'').normalize('NFKC');return/(多少|是什么|为何物|哪(?:个|些|类|种|项)|何时|什么时候|哪天|几月几日|what\s+(?:is|was|were)|which|when|how\s+(?:many|much))/iu.test(text)&&!/(为什么|为何|原因|机制|解释|如何导致|因果|依据|理由|建议|应该|怎么办)/u.test(text);}
 
-function finalizeContext({evaluation_mode,request,snapshot,history,termination_reason}){
-  const working_memory=buildWorkingMemory(request,snapshot.memory_nodes,snapshot.memory_edges,snapshot.assessment||snapshot.answer_brief||{}),evaluations=history.filter(record=>record.decision.worker==='assess'),modelTraces=evaluations.map(record=>record?.result?.trace).filter(Boolean),modelTrace=modelTraces.at(-1)||null,answerSelection=history.findLast(record=>record.decision.worker==='answer')?.result?.trace?.answer_selection||null;
+function finalizeContext({evaluation_mode,request,snapshot,history,termination_reason,relation_evaluator_call_budget=RELATION_EVALUATOR_CALL_BUDGET}){
+  const medLoCoMo=request.strategy_namespace==='medlocomo',roleCoverage=medLoCoMo?buildMedLoCoMoRoleCoverage({assessment:snapshot.assessment||snapshot.answer_brief,memory_nodes:snapshot.memory_nodes}):null,evidenceLedger=medLoCoMo?buildMedLoCoMoEvidenceLedger({question_request:request,assessment:{...(snapshot.assessment||snapshot.answer_brief||{}),role_coverage:roleCoverage?.rows||[]},memory_nodes:snapshot.memory_nodes}):null,working_memory=buildWorkingMemory(request,snapshot.memory_nodes,snapshot.memory_edges,snapshot.assessment||snapshot.answer_brief||{}),evaluations=history.filter(record=>record.decision.worker==='assess'),modelTraces=evaluations.map(record=>record?.result?.trace).filter(Boolean),modelTrace=modelTraces.at(-1)||null,answerSelection=history.findLast(record=>record.decision.worker==='answer')?.result?.trace?.answer_selection||null;
   const tokenInput=sumNullable(modelTraces.map(trace=>trace?.token_input)),tokenOutput=sumNullable(modelTraces.map(trace=>trace?.token_output)),reportedTotal=sumNullable(modelTraces.map(trace=>trace?.total_tokens)),totalTokens=reportedTotal??(tokenInput!=null||tokenOutput!=null?Number(tokenInput||0)+Number(tokenOutput||0):null),latencyMs=sumNullable(modelTraces.map(trace=>trace?.latency_ms));
-  const answerSelected=termination_reason==='answer_selected'&&history.at(-1)?.decision.worker==='answer',verificationComplete=snapshot.verification?.complete===true,packetFrozen=answerSelected||(termination_reason==='single_explicit_instruction'&&verificationComplete),answerReady=packetFrozen,readinessSemantics='packet_frozen_for_answer_generation; verification_complete is a separate provenance-and-size check';
+  const answerSelected=termination_reason==='answer_selected'&&history.at(-1)?.decision.worker==='answer',verificationComplete=snapshot.verification?.complete===true,packetFrozen=answerSelected||(termination_reason==='single_explicit_instruction'&&verificationComplete),formalMedLoCoMo=medLoCoMo&&termination_reason!=='single_explicit_instruction',finalRuntime=history.at(-1)?.runtime_state||{},semanticAssessmentFresh=formalMedLoCoMo?finalRuntime.semantic_assessment_fresh===true:Boolean(snapshot.assessment),sourceVerificationFresh=formalMedLoCoMo?finalRuntime.source_verification_fresh===true:verificationComplete,crossAdmissionSemanticsComplete=!isMedLoCoMoCrossAdmissionComparison(request)||crossAdmissionComparisonAssessmentReady(snapshot),semanticComplete=semanticAssessmentFresh&&snapshot.assessment?.assessment==='supported'&&!array(snapshot.assessment?.missing_information).filter(Boolean).length&&roleCoverage?.complete!==false&&crossAdmissionSemanticsComplete,answerReady=formalMedLoCoMo?packetFrozen&&semanticAssessmentFresh&&sourceVerificationFresh&&semanticComplete:packetFrozen,answerReadinessBlockers=formalMedLoCoMo?[...(!packetFrozen?['packet_not_frozen']:[]),...(!semanticAssessmentFresh?['final_packet_not_semantically_assessed']:[]),...(semanticAssessmentFresh&&!semanticComplete?['semantic_assessment_incomplete']:[]),...(!sourceVerificationFresh?['final_packet_not_source_verified']:[])]:[],readinessSemantics=formalMedLoCoMo?'answer_ready requires a frozen final packet, a complete semantic assessment after its last node/edge mutation, and source verification of that same packet; structural verification never substitutes for semantic completeness':'packet_frozen_for_answer_generation; verification_complete is a separate provenance-and-size check';
   const relationEvaluatorFailed=modelTraces.some(trace=>Boolean(trace?.error));
-  return{evaluation_mode,question_request:request,temporal_gate:snapshot.temporal_gate||null,refinement_boundary:snapshot.refinement_boundary||null,patient_profile:snapshot.patient_profile||null,recent_sessions:snapshot.recent_sessions||[],memory_nodes:snapshot.memory_nodes,memory_edges:snapshot.memory_edges,working_memory,verification:snapshot.verification,semantic_evaluation:snapshot.assessment,packet_frozen:packetFrozen,verification_complete:verificationComplete,answer_ready:answerReady,answer_ready_semantics:readinessSemantics,investigation_policy:{version:PROMPTS.investigation_policy.version,mode:'grounded_clinician_policy_owned_closed_loop',termination_reason,packet_frozen:packetFrozen,verification_complete:verificationComplete,answer_ready:answerReady,answer_ready_semantics:readinessSemantics,learned_action_prior_used:history.some(record=>Boolean(record.learned_action_prior)),action_exploration_used:history.some(record=>Boolean(record.action_exploration_assignment))},investigation_trace:history.map(record=>({ordinal:record.turn,worker:record.decision.worker,information_status:record.decision.information_status,instruction:record.decision.instruction,effective_instruction:record.result.trace?.effective_instruction||record.decision.instruction,refinement_boundary:record.result.trace?.refinement_boundary||null,...(record.result.trace?.answer_selection?{answer_selection:record.result.trace.answer_selection}:{}),rationale:record.decision.rationale,result_summary:record.result.summary,changed:record.result.changed,...(record.learned_action_prior?{learned_action_prior:record.learned_action_prior}:{}),...(record.action_exploration_assignment?{action_exploration_assignment:record.action_exploration_assignment}:{})})),trace:{investigation:{version:MEDMEMORY_MATCHED_RUNTIME_VERSION,termination_reason,packet_frozen:packetFrozen,verification_complete:verificationComplete,answer_ready:answerReady,answer_ready_semantics:readinessSemantics,temporal_gate:snapshot.temporal_gate||null,refinement_boundary:snapshot.refinement_boundary||null,turns:history},semantic_relation_evaluator:evaluations.length?{status:relationEvaluatorFailed?'failed':'completed',model_calls:evaluations.length,call_budget:RELATION_EVALUATOR_CALL_BUDGET,token_input:tokenInput,token_output:tokenOutput,total_tokens:totalTokens,latency_ms:latencyMs,model_trace:modelTrace,model_traces:modelTraces,...(relationEvaluatorFailed?{error:modelTraces.findLast(trace=>trace?.error)?.error||null}:{})}:{status:'not_run',model_calls:0,call_budget:RELATION_EVALUATOR_CALL_BUDGET},answer_selection:answerSelection,unified_memory_graph:true,patient_profile_unranked:true,recent_sessions_unranked:true,deterministic_temporal_gate_applied:Boolean(snapshot.temporal_gate),persistent_refinement_boundary_applied:Boolean(snapshot.refinement_boundary),query_preanalysis_performed:false}};
+  const policyPrompt=request.strategy_namespace==='medlocomo'?PROMPTS.medlocomo_investigation_policy:PROMPTS.investigation_policy,policyMode=request.strategy_namespace==='medlocomo'?'medlocomo_distilled_policy_owned_closed_loop':'grounded_clinician_policy_owned_closed_loop';
+  return{evaluation_mode,question_request:request,temporal_gate:snapshot.temporal_gate||null,refinement_boundary:snapshot.refinement_boundary||null,patient_profile:snapshot.patient_profile||null,recent_sessions:snapshot.recent_sessions||[],admission_overview:snapshot.admission_overview||null,investigation_focus:snapshot.investigation_focus||null,role_coverage:roleCoverage,evidence_ledger:evidenceLedger,memory_nodes:snapshot.memory_nodes,memory_edges:snapshot.memory_edges,working_memory,verification:snapshot.verification,semantic_evaluation:snapshot.assessment,packet_frozen:packetFrozen,verification_complete:verificationComplete,semantic_assessment_fresh:semanticAssessmentFresh,source_verification_fresh:sourceVerificationFresh,semantic_complete:semanticComplete,answer_ready:answerReady,answer_ready_blockers:answerReadinessBlockers,answer_ready_semantics:readinessSemantics,investigation_policy:{version:policyPrompt.version,mode:policyMode,termination_reason,packet_frozen:packetFrozen,verification_complete:verificationComplete,semantic_assessment_fresh:semanticAssessmentFresh,source_verification_fresh:sourceVerificationFresh,semantic_complete:semanticComplete,answer_ready:answerReady,answer_ready_blockers:answerReadinessBlockers,answer_ready_semantics:readinessSemantics,learned_action_prior_used:history.some(record=>Boolean(record.learned_action_prior)),action_exploration_used:history.some(record=>Boolean(record.action_exploration_assignment))},investigation_trace:history.map(record=>({ordinal:record.turn,worker:record.decision.worker,information_status:record.decision.information_status,instruction:record.decision.instruction,effective_instruction:record.result.trace?.effective_instruction||record.decision.instruction,investigation_focus:record.decision.investigation_focus||null,refinement_boundary:record.result.trace?.refinement_boundary||null,...(record.result.trace?.answer_selection?{answer_selection:record.result.trace.answer_selection}:{}),rationale:record.decision.rationale,result_summary:record.result.summary,changed:record.result.changed,finalization_state:record.runtime_state||null,...(record.learned_action_prior?{learned_action_prior:record.learned_action_prior}:{}),...(record.action_exploration_assignment?{action_exploration_assignment:record.action_exploration_assignment}:{})})),trace:{investigation:{version:MEDMEMORY_MATCHED_RUNTIME_VERSION,termination_reason,packet_frozen:packetFrozen,verification_complete:verificationComplete,semantic_assessment_fresh:semanticAssessmentFresh,source_verification_fresh:sourceVerificationFresh,semantic_complete:semanticComplete,answer_ready:answerReady,answer_ready_blockers:answerReadinessBlockers,answer_ready_semantics:readinessSemantics,temporal_gate:snapshot.temporal_gate||null,refinement_boundary:snapshot.refinement_boundary||null,admission_overview_version:snapshot.admission_overview?.version||null,evidence_ledger_version:evidenceLedger?.version||null,turns:history},semantic_relation_evaluator:evaluations.length?{status:relationEvaluatorFailed?'failed':'completed',model_calls:evaluations.length,call_budget:relation_evaluator_call_budget,token_input:tokenInput,token_output:tokenOutput,total_tokens:totalTokens,latency_ms:latencyMs,model_trace:modelTrace,model_traces:modelTraces,...(relationEvaluatorFailed?{error:modelTraces.findLast(trace=>trace?.error)?.error||null}:{})}:{status:'not_run',model_calls:0,call_budget:relation_evaluator_call_budget},answer_selection:answerSelection,...(snapshot.initial_context_trace?{initial_context:snapshot.initial_context_trace}:{}),unified_memory_graph:true,patient_profile_unranked:true,recent_sessions_unranked:true,deterministic_temporal_gate_applied:Boolean(snapshot.temporal_gate),persistent_refinement_boundary_applied:Boolean(snapshot.refinement_boundary),query_preanalysis_performed:false}};
 }
 
 function instrumentAnswerWorker(worker,answerLimit){
@@ -158,6 +240,15 @@ function semanticSelectionIds(snapshot,visibleIds){
     ...array(assessment.reasoning_hypotheses).flatMap(item=>[...array(item?.supporting_memory_ids),...array(item?.counter_memory_ids)]),
   ].map(String).filter(id=>visible.has(id));
   return[...new Set(ids)];
+}
+function isMedLoCoMoCrossAdmissionComparison(request={}){return String(request?.strategy_namespace||'')==='medlocomo'&&String(request?.query_type||'')==='cross_admission_comparison';}
+function crossAdmissionComparisonAssessmentReady(snapshot={}){
+  const assessment=snapshot?.assessment||snapshot?.answer_brief;if(assessment?.assessment!=='supported'||array(assessment?.missing_information).filter(Boolean).length)return false;
+  const nodes=array(snapshot.memory_nodes),byId=new Map(nodes.map(node=>[String(node?.memory_id||''),node])),episodesForIds=ids=>new Set(array(ids).map(String).map(id=>String(byId.get(id)?.episode_id||'')).filter(Boolean)),focusEpisodes=new Set();
+  for(const item of array(assessment.answer_focus)){if(!String(item?.aspect||'').trim())continue;const memoryIds=[...array(item?.memory_ids),...array(item?.source_refs).filter(ref=>String(ref).startsWith('memory:')).map(ref=>String(ref).slice(7))];for(const episode of episodesForIds(memoryIds))focusEpisodes.add(episode);for(const ref of array(item?.source_refs)){const value=String(ref);if(value.startsWith('session:')&&value.slice(8))focusEpisodes.add(value.slice(8));}}
+  if(focusEpisodes.size>=2)return true;
+  for(const connection of array(assessment.connections)){if(connection?.assessment!=='supports')continue;const connectionEpisodes=episodesForIds([connection?.from_memory_id,connection?.to_memory_id,...array(connection?.supporting_memory_ids)]);if(connectionEpisodes.size>=2)return true;}
+  return false;
 }
 function hasDirectedSearchInstruction(instruction={}){
   const temporal=instruction?.temporal&&typeof instruction.temporal==='object'?instruction.temporal:{},arrays=['search_terms','expansion_terms','required_terms','memory_ids','episode_ids','numeric_signals','lenses'];
@@ -272,7 +363,7 @@ function executableBoundaryTemporal(value={}){
 
 function hasEffectiveTemporalInstruction(value={}){
   const temporal=plainObject(value),operator=String(temporal.operator||'').toLowerCase();
-  return resolvePolicyTemporalDates(temporal).length>0||array(temporal.month_keys).some(value=>/^20\d{2}-\d{2}$/u.test(String(value)))||Boolean(canonicalPolicyDate(temporal.start_date)||canonicalPolicyDate(temporal.end_date))||['earliest','latest','current','history'].includes(operator);
+  return resolvePolicyTemporalDates(temporal).length>0||array(temporal.month_keys).some(value=>Boolean(canonicalCalendarMonth(value)))||Boolean(canonicalPolicyDate(temporal.start_date)||canonicalPolicyDate(temporal.end_date))||['earliest','latest','current','history'].includes(operator);
 }
 function temporalDirectionInText(value){return/(?:prior\s+to|before|after|earliest|latest|first|initial|onset|截至|以前|之前|之后|以后|最初|首次|最早|最晚|当前|最新)/iu.test(String(value||''));}
 function isLatestStatusQuestion(value){return/(?:当前|目前|现在|如今|现阶段|最新|最近一次|至今|后来|后续|current(?:ly)?|now|latest|most\s+recent|at\s+present|since\s+then|subsequent(?:ly)?|afterwards)/iu.test(String(value||'').normalize('NFKC'));}
@@ -310,12 +401,29 @@ function resolvePolicyTemporalDates(temporal={}){
   if(base&&Number.isInteger(offset)&&Math.abs(offset)<=3660){const value=new Date(`${base}T00:00:00.000Z`);value.setUTCDate(value.getUTCDate()+offset);dates.push(value.toISOString().slice(0,10));}
   return[...new Set(dates)];
 }
-function canonicalPolicyDate(value){
-  const match=/^(?<year>20\d{2})[-/.](?<month>\d{1,2})[-/.](?<day>\d{1,2})$/u.exec(String(value||'').trim());if(!match)return'';
-  const year=Number(match.groups.year),month=Number(match.groups.month),day=Number(match.groups.day),date=new Date(Date.UTC(year,month-1,day));return date.getUTCFullYear()===year&&date.getUTCMonth()===month-1&&date.getUTCDate()===day?date.toISOString().slice(0,10):'';
-}
 function plainObject(value){return value&&typeof value==='object'&&!Array.isArray(value)?value:{};}
 
-function emptySnapshot(patientProfile=null,recentSessions=[],temporalGate=null,stateProjection=false,strategyProfile=null){return{state_projection:stateProjection===true,strategy_profile:strategyProfile||null,temporal_gate:temporalGate||null,refinement_boundary:null,patient_profile:patientProfile&&typeof patientProfile==='object'?patientProfile:null,recent_sessions:array(recentSessions),memory_nodes:[],memory_edges:[],verification:null,assessment:null,answer_brief:null,worker_state:null};}
+let defaultMedLoCoMoInstructionPolicy;
+function resolveMedLoCoMoSearchInstructionPrior(request,supplied){
+  if(String(request?.strategy_namespace||'')!=='medlocomo'||supplied===false)return null;
+  if(supplied?.version==='medlocomo-runtime-search-instruction-prior.v1')return structuredClone(supplied);
+  let loaded=supplied;
+  if(loaded===undefined){
+    if(defaultMedLoCoMoInstructionPolicy===undefined){
+      try{defaultMedLoCoMoInstructionPolicy=loadMedLoCoMoInstructionPolicy();}
+      catch(error){
+        // A missing, pending, stale, or failed-gate optional artifact must not
+        // turn an otherwise valid MedLoCoMo run into a partial experiment.
+        // Explicitly supplied artifacts still fail closed below.
+        defaultMedLoCoMoInstructionPolicy={version:'medlocomo-runtime-search-instruction-prior.v1',status:'rejected',artifact_hash:null,search_terms:[],ranked_terms:[],term_source:'none',max_augmented_terms:0,stop_prior:{status:'not_trained',runtime_gate_applied:false},rejection_reason:String(error?.message||error)};
+      }
+    }
+    loaded=defaultMedLoCoMoInstructionPolicy;
+  }
+  if(loaded?.version==='medlocomo-runtime-search-instruction-prior.v1')return structuredClone(loaded);
+  return loaded?medLoCoMoSearchInstructionPrior(loaded,{question:request.question,question_type:request.query_type}):null;
+}
+function emptySnapshot(patientProfile=null,recentSessions=[],temporalGate=null,stateProjection=false,strategyProfile=null,initialMemoryNodes=[],initialMemoryEdges=[],initialContextTrace=null,searchInstructionPrior=null,admissionOverview=null){const nodes=mergeById([],initialMemoryNodes,'memory_id'),ids=new Set(nodes.map(node=>String(node.memory_id))),edges=mergeById([],initialMemoryEdges,'edge_id').filter(edge=>ids.has(String(edge.from_memory_id))&&ids.has(String(edge.to_memory_id)));return{state_projection:stateProjection===true,strategy_profile:strategyProfile||null,search_instruction_prior:searchInstructionPrior||null,admission_overview:admissionOverview||null,investigation_focus:null,role_coverage:null,evidence_ledger:null,temporal_gate:temporalGate||null,refinement_boundary:null,patient_profile:patientProfile&&typeof patientProfile==='object'?patientProfile:null,recent_sessions:array(recentSessions),memory_nodes:nodes,memory_edges:edges,initial_context_trace:initialContextTrace||null,verification:null,assessment:null,answer_brief:null,worker_state:null};}
+function mergeById(left,right,key){const out=[],seen=new Set();for(const item of[...array(left),...array(right)]){const id=String(item?.[key]||'');if(!id||seen.has(id))continue;seen.add(id);out.push(item);}return out;}
 function array(value){return Array.isArray(value)?value:[];}
 export function assertNoHiddenRuntimeInput(value,path='runtime'){return assertNoHiddenBenchmarkInput(value,path);}

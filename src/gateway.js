@@ -34,6 +34,7 @@ export class ModelGateway {
     const prompt = promptFor(component, input);
     const officialMessages=typeof PROMPTS[component]?.messages==='function'?PROMPTS[component].messages(input):null;
     const structuredOutput=structuredOutputContract(component,input,this.config);
+    const configuredRetries=Number(this.config.retries)||0,requestedRetries=Number(options.maxRetries),retryLimit=Number.isInteger(requestedRetries)&&requestedRetries>=0?Math.max(configuredRetries,Math.min(4,requestedRetries)):configuredRetries;
     let raw = '', parsed, retries = 0, error = null, attempts=[], finishReason=null, requestedMaxTokens=this.config.max_tokens;
     try {
       if (this.config.provider === 'mock') {
@@ -41,7 +42,7 @@ export class ModelGateway {
         raw = JSON.stringify(parsed);
         parsed = schemaValidator ? schemaValidator(parsed) : parsed;
       } else {
-        for (let attempt = 0; attempt <= this.config.retries; attempt++) {
+        for (let attempt = 0; attempt <= retryLimit; attempt++) {
           retries = attempt;
           try {
             const previous=attempts.at(-1),repairInstruction=attempt?promptRetryInstruction(component,previous):null,repair=repairInstruction?`${prompt}\n\n${repairInstruction}`:prompt;
@@ -49,7 +50,7 @@ export class ModelGateway {
             if(finishReason==='length')throw new Error(`Model output was truncated at max_tokens=${requestedMaxTokens}`);
             parsed = parseJSONResponse(raw,Boolean(options.extractJsonObject)); parsed = schemaValidator ? schemaValidator(parsed) : parsed;
             attempts.push({attempt,raw,parsed,finish_reason:finishReason,max_tokens:requestedMaxTokens,usage:completion.usage}); break;
-          } catch (e) { attempts.push({attempt,raw,error:String(e.message||e),validation_errors:e.errors||[],finish_reason:finishReason,max_tokens:requestedMaxTokens}); if (attempt === this.config.retries) throw e;await backoff(attempt,e); }
+          } catch (e) { attempts.push({attempt,raw,error:String(e.message||e),validation_errors:e.errors||[],finish_reason:finishReason,max_tokens:requestedMaxTokens}); if (attempt === retryLimit) throw e;await backoff(attempt,e); }
         }
       }
     } catch (e) {
@@ -58,10 +59,14 @@ export class ModelGateway {
         message: String(e.message || e), validation_errors: e.errors || [],
         suggestion: 'Inspect the raw model response, correct the model/prompt configuration, then rerun this step.'
       };
-      const gatewayTrace=this.#trace(component, input, prompt, raw, parsed, start, retries, error, attempts,finishReason,requestedMaxTokens,{...options,structuredOutput});gatewayTrace.input=input;
+      // A parsed JSON value that failed schema validation is untrusted model
+      // output, not a validated component response. Keep its raw text and
+      // validation error for diagnostics, but never feed the object back into
+      // a later runtime-state boundary through parsed_response.
+      const gatewayTrace=this.#trace(component, input, prompt, raw, null, start, retries, error, attempts,finishReason,requestedMaxTokens,{...options,structuredOutput,retryLimit});gatewayTrace.input=input;
       throw Object.assign(e, { gatewayTrace });
     }
-    return { value: parsed, trace: this.#trace(component, input, prompt, raw, parsed, start, retries, error, attempts,finishReason,requestedMaxTokens,{...options,structuredOutput}) };
+    return { value: parsed, trace: this.#trace(component, input, prompt, raw, parsed, start, retries, error, attempts,finishReason,requestedMaxTokens,{...options,structuredOutput,retryLimit}) };
   }
 
   async completeText(component,input,mockFactory,options={}){
@@ -85,7 +90,7 @@ export class ModelGateway {
       : { max_tokens: maxTokens };
     const response = await fetch(`${this.config.base_url.replace(/\/$/, '')}/chat/completions`, {
       method: 'POST', headers: this.#headers(), signal: AbortSignal.timeout(this.config.timeout_ms),
-      body: JSON.stringify({ model: this.config.model, temperature: this.config.temperature, ...tokenBudget,...(Number.isInteger(this.config.seed)?{seed:this.config.seed}:{}),...(this.config.provider==='dashscope'?{enable_thinking:false}:{}),
+      body: JSON.stringify({ model: this.config.model, temperature: this.config.temperature, ...tokenBudget,...(Number.isInteger(this.config.seed)?{seed:this.config.seed}:{}),...(typeof this.config.enable_thinking==='boolean'?{enable_thinking:this.config.enable_thinking}:{}),
         ...(responseFormat?{response_format:responseFormat}:{}),messages:messages||[{role:'user',content:prompt}] })
     });
     const raw = await response.text();
@@ -109,7 +114,7 @@ export class ModelGateway {
     return sanitizeSecrets({ component, prompt_version: PROMPTS[component]?.version || 'none', provider: this.config.provider,
       model: this.config.model, config: this.publicConfig(), latency_ms: +(performance.now() - start).toFixed(2),finish_reason:finishReason,requested_max_tokens:requestedMaxTokens,token_budget_parameter:tokenBudgetParameter(this.config),
       token_input: tokensIn, token_output: tokensOut, estimated_cost_usd: 0, retries, raw_model_response: raw,
-      model_input:input, prompt, parsed_response: parsed ?? null, raw_model_attempts:attempts, response_format:options.structuredOutput?.response_format,
+      model_input:input, prompt, parsed_response: parsed ?? null, raw_model_attempts:attempts, retry_limit:options.retryLimit??this.config.retries, response_format:options.structuredOutput?.response_format,
       output_json_schema:options.structuredOutput?.json_schema||options.structuredOutput?.response_format?.json_schema||null,
       schema_enforcement:options.structuredOutput?.enforcement||'json_object',error, mock: this.config.provider === 'mock' });
   }

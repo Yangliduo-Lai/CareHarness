@@ -19,6 +19,11 @@ test('factor domains remain orthogonal to family labels',()=>{
   assert.ok(byId.get('medical').factor_domains.includes('biological'));assert.ok(byId.get('social').factor_domains.includes('social'));assert.ok(byId.get('behavior').factor_domains.includes('behavioral'));
 });
 
+test('future-year date prefixes do not split the same clinical factor',()=>{
+  const update=updateMemoryGraph([incoming('early','2114-09-23 患者空腹血糖为 7 mmol/L。',{families:['CS'],event_time:'2114-09-23'}),incoming('late','2209-12-31 患者空腹血糖为 9 mmol/L。',{families:['CS'],episode_id:'session-2',event_time:'2209-12-31'})],[],[],{subject_id:'graph-patient'});
+  assert.equal(update.nodes[0].factor_key,update.nodes[1].factor_key);
+});
+
 test('one dated Session remains provenance membership and is not materialized as ordinary edges',()=>{
   const update=pipelineInternals.updateMemoryGraph([incoming('a','患者报告目标症状。'),incoming('b','医生记录相关检查。'),incoming('c','患者确认治疗执行。')],[],[],{subject_id:'graph-patient'});
   assert.equal(update.edges.some(edge=>edge.relation_type==='co_observed'),false);

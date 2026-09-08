@@ -162,6 +162,7 @@ function mockRelationOutput(candidates){return{relations:candidates.map(candidat
 
 function eligibleEndpoint(node,settings){
   if(!node||typeof node!=='object'||!clean(node.memory_id)||!clean(node.subject_id)||!clean(node.text))return false;
+  if(node.construction_kind==='literal_provenance')return false;
   const source=typeof node.source_text==='string'?node.source_text:'';if(!source.trim()||source.length>settings.maxSourceCharacters)return false;
   if(!inspectMemoryNodeSourceAlignment(node).aligned)return false;
   return Array.isArray(node.span)&&node.span[1]-node.span[0]===source.length;

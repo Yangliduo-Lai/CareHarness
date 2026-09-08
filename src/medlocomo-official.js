@@ -25,6 +25,25 @@ export const MEDLOCOMO_ABSTENTION_PHRASES=Object.freeze([
 
 const NORMALIZED_ABSTENTIONS=new Set(MEDLOCOMO_ABSTENTION_PHRASES.map(normalizeMedLoCoMoAnswer));
 
+// Output-surface repair only: canonicalize text that already says the record
+// is insufficient. This does not decide answerability or convert a clinical
+// finding, negative finding, or ordinary short answer into refusal.
+export function canonicalizeMedLoCoMoAbstention(value){
+  const answer=String(value||'').trim(),normalized=normalizeMedLoCoMoAnswer(answer);
+  if(!normalized)return answer;
+  if(NORMALIZED_ABSTENTIONS.has(normalized))return MEDLOCOMO_CANONICAL_ABSTENTION;
+  const refusalLike=[
+    /^(?:i|we) (?:cannot|can t|am unable to|are unable to) (?:answer|determine|identify|confirm|find|tell)\b/iu,
+    /^(?:unable to|cannot|can t) (?:answer|determine|identify|confirm|find|tell)\b/iu,
+    /^(?:this )?question (?:cannot|can t|is not|isn t) (?:be )?answer(?:ed|able)\b/iu,
+    /^(?:there is|there are) (?:no|not enough|insufficient) (?:information|evidence|documentation|detail|data)\b/iu,
+    /^(?:no|not enough|insufficient) (?:information|evidence|documentation|detail|data) (?:is )?(?:available|provided|documented|present|given)?\b/iu,
+    /^(?:(?:the|provided|available) )?(?:record|records|chart|context|documentation) (?:does not|do not|doesn t|don t) (?:mention|document|provide|contain|show|establish|specify|state|support|confirm)\b/iu,
+    /^(?:based on|from) (?:the )?(?:provided|available)? ?(?:record|records|chart|context|documentation)[\s\S]{0,80}\b(?:cannot|can t|unable|not enough|insufficient|no information)\b/iu
+  ];
+  return refusalLike.some(pattern=>pattern.test(normalized))?MEDLOCOMO_CANONICAL_ABSTENTION:answer;
+}
+
 export function normalizeMedLoCoMoAnswer(value){
   return String(value||'').toLowerCase().replace(PUNCTUATION,' ').replace(ARTICLES,' ').replace(/\s+/gu,' ').trim();
 }

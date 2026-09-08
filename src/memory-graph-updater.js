@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { inspectMemoryNodeSourceAlignment,MEMORY_FAMILIES } from './schema.js';
+import { stripLeadingCalendarExpression } from './temporal-expressions.js';
 
 /**
  * Memory Nodes are durable clinical facts. Episode membership is provenance on
@@ -8,6 +9,15 @@ import { inspectMemoryNodeSourceAlignment,MEMORY_FAMILIES } from './schema.js';
 export function updateMemoryGraph(incomingNodes,historicalNodes,historicalEdges,observation,options={}){
   const nodes=[],deltas=[],index=createMemoryIndex(historicalNodes),incoming=coalesceIncomingNodes(incomingNodes);
   for(const candidate of incoming){
+    if(isLiteralProvenanceNode(candidate)){
+      const node={
+        ...candidate,subject_id:observation.subject_id,families:normalizeFamilies(candidate.families),
+        factor_key:`literal_provenance:${observation.observation_id}:${candidate.turn_id||candidate.memory_id}`,
+        factor_domains:['provenance'],status:'active',valid_from:candidate.event_time||null,version:1,
+        version_chain:[],predecessor_memory_id:null,successor_memory_id:null,conflicts_with_memory_id:null,operation:'ADD'
+      };
+      nodes.push(node);deltas.push({operation:'ADD',memory_id:node.memory_id,prior_memory_id:null,families:[...node.families]});continue;
+    }
     const factorKey=index.resolveFactorKey(candidate),owned=index.factorNodes(factorKey),ordered=[...owned].sort(compareChronology),newOrder=eventOrder(candidate),prior=Number.isFinite(newOrder)?[...ordered].reverse().find(node=>eventOrder(node)<=newOrder):ordered.at(-1),successor=Number.isFinite(newOrder)?ordered.find(node=>eventOrder(node)>newOrder):null,transition=classifyMemoryTransition(prior,candidate),conflictTarget=transition.operation==='CONFLICT'?(prior?.status==='conflict'?prior.conflicts_with_memory_id||prior.memory_id:prior?.memory_id||null):null;
     const node={
       ...candidate,
@@ -28,7 +38,7 @@ export function updateMemoryGraph(incomingNodes,historicalNodes,historicalEdges,
     deltas.push({operation:node.operation,memory_id:node.memory_id,prior_memory_id:prior?.memory_id||null,families:[...node.families]});
   }
   return{
-    version:'careharness-memory-graph-updater.v2-semantic-longitudinal',
+    version:nodes.some(isLiteralProvenanceNode)?'careharness-memory-graph-updater.v3-semantic-plus-literal-provenance':'careharness-memory-graph-updater.v2-semantic-longitudinal',
     nodes,
     edges:buildPersistentMemoryEdges(nodes,historicalNodes,historicalEdges,options.relationProposals),
     deltas,
@@ -64,6 +74,7 @@ export function genericTextSimilarity(left,right){
  */
 export function inspectLongitudinalRelation(fromNode,toNode,proposedRelation=null){
   if(!fromNode||!toNode)return{grounded:false,relation:null,reasons:['missing_endpoint']};
+  if(isLiteralProvenanceNode(fromNode)||isLiteralProvenanceNode(toNode))return{grounded:false,relation:null,reasons:['literal_provenance_is_not_semantic_state']};
   if(String(fromNode.subject_id||'')!==String(toNode.subject_id||''))return{grounded:false,relation:null,reasons:['cross_subject']};
   if(!inspectMemoryNodeSourceAlignment(fromNode).aligned||!inspectMemoryNodeSourceAlignment(toNode).aligned)return{grounded:false,relation:null,reasons:['ungrounded_endpoint']};
   const sameFactor=String(fromNode.factor_key||'')&&String(fromNode.factor_key)===String(toNode.factor_key||''),similarity=factorSimilarity(fromNode,toNode);
@@ -97,6 +108,7 @@ function buildPersistentMemoryEdges(nodes,historicalNodes,historicalEdges,relati
     if(known.has(key))return;known.add(key);edges.push(candidate);
   };
   for(const node of nodes){
+    if(isLiteralProvenanceNode(node))continue;
     const priorId=node.operation==='CONFLICT'?node.conflicts_with_memory_id:node.predecessor_memory_id,prior=nodeById.get(String(priorId||''));
     if(prior){const transition=classifyMemoryTransition(prior,node);if(transition.relation)add({from:prior.memory_id,to:node.memory_id,relation_type:transition.relation,source:'source_grounded_memory_transition'});}
     const successor=nodeById.get(String(node.successor_memory_id||''));
@@ -131,6 +143,7 @@ function verifiedRelationProposal(proposal,nodeById){
   const confidence=Number(proposal.confidence);if(!Number.isFinite(confidence)||confidence<.85||confidence>1)return null;
   if(!exactEndpointSupport(proposal.support_memory_ids,fromId,toId))return null;
   const fromNode=nodeById.get(fromId),toNode=nodeById.get(toId);
+  if(isLiteralProvenanceNode(fromNode)||isLiteralProvenanceNode(toNode))return null;
   if(!strictSourceAlignedEndpoint(fromNode)||!strictSourceAlignedEndpoint(toNode))return null;
   if(String(fromNode.subject_id)!==String(toNode.subject_id))return null;
 
@@ -206,7 +219,7 @@ function coalesceIncomingNodes(nodes){
 function provenanceKey(node){
   const span=Array.isArray(node?.span)&&node.span.length===2?`${node.span[0]}:${node.span[1]}`:'';
   if(!node?.observation_id||!span)return'';
-  return`${node.observation_id}\u0000${span}`;
+  return`${isLiteralProvenanceNode(node)?'literal_provenance':'semantic_state'}\u0000${node.observation_id}\u0000${span}`;
 }
 
 function equivalentSemanticOccurrence(left,right){
@@ -224,6 +237,7 @@ function canonicalOccurrence(left,right){
 function createMemoryIndex(nodes){
   const byFactor=new Map(),identities=new Map(),all=[];
   const add=node=>{
+    if(isLiteralProvenanceNode(node))return;
     all.push(node);
     const factor=String(node.factor_key||memoryTopicKey(node.text)),members=byFactor.get(factor)||[];members.push(node);byFactor.set(factor,members);
     const identity=clinicalIdentity(node.text);if(identity){const values=identities.get(identity)||[];values.push(node);identities.set(identity,values);}
@@ -247,6 +261,8 @@ function createMemoryIndex(nodes){
     }
   };
 }
+
+function isLiteralProvenanceNode(node){return node?.construction_kind==='literal_provenance';}
 
 function familyCompatible(left,right){const a=new Set(left?.families||[]),b=right?.families||[];return!a.size||!b.length||b.some(family=>a.has(family));}
 
@@ -290,8 +306,7 @@ function cleanEntity(value){return String(value||'').replace(/^(?:目前|当前|
 function stripAttribution(value){return String(value||'').replace(/^(?:(?:患者|医生)(?:原话|陈述|报告|记录|建议|解释|评估|认为|指出|告知)?[：:]?)+/u,'').trim();}
 
 function semanticCoreText(text){
-  return stripAttribution(String(text||'').normalize('NFKC'))
-    .replace(/^(?:于)?20\d{2}(?:[-/.年]\d{1,2})?(?:[-/.月]\d{1,2}日?)?[，,:：\s]*/u,'')
+  return stripLeadingCalendarExpression(stripAttribution(String(text||'').normalize('NFKC')))
     .replace(/^(?:目前|当前|近期|最近|现在|此前|之前|后来|今天|昨日|昨晚)[，,:：\s]*/u,'')
     .trim();
 }

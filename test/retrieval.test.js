@@ -95,6 +95,25 @@ test('top-K diversifies obvious same-Session duplicates before admitting a secon
   assert.deepEqual(new Set(result.memory_nodes.map(item=>item.memory_id)),new Set(['literal','different']));assert.equal(result.trace.near_duplicate_candidate_count,1);assert.equal(result.trace.distinct_fact_candidate_count,2);
 });
 
+test('frequency Search preserves distinct Admission coverage before backfilling same-Admission candidates',async()=>{
+  const memories=[
+    node('a-1','Vancomycin was administered for an infected left femoral catheter.',{episode_id:'admission-a'}),
+    node('a-2','Vancomycin dosing was adjusted after MRSA blood cultures.',{episode_id:'admission-a'}),
+    node('a-3','Vancomycin level monitoring accompanied the tunneled dialysis line infection.',{episode_id:'admission-a'}),
+    node('b-1','Vancomycin was administered for a catheter-related infection during this admission.',{episode_id:'admission-b'}),
+    node('c-1','Vancomycin treatment covered another infected dialysis catheter.',{episode_id:'admission-c'}),
+  ],scores=new Map([['a-1',.99],['a-2',.98],['a-3',.97],['b-1',.4],['c-1',.3]]),instruction={search_terms:['Vancomycin']},questionRequest=createQuestionRequest({question:'How many admissions involved vancomycin for catheter-related infections?',task:'frequency_pattern',strategy_namespace:'medlocomo',scope:'cross_admission'});
+  const ordinary=retrieveMemoryCandidates({question_request:questionRequest,instruction},memories,{limit:3,semantic_scores:scores,semantic_top_k:5});
+  assert.deepEqual(ordinary.memory_nodes.map(item=>item.episode_id),['admission-a','admission-a','admission-a']);
+
+  const workers=createMemoryInvestigationWorkers({question_request:questionRequest,memory_nodes:memories,candidate_budget:3,embedding_retriever:async()=>({scores,trace:{status:'ready'}})}),result=await workers.search.run({state:{snapshot:{memory_nodes:[],memory_edges:[]}},instruction});
+  assert.deepEqual(new Set(result.snapshot.memory_nodes.map(item=>item.episode_id)),new Set(['admission-a','admission-b','admission-c']));
+  assert.equal(result.trace.episode_diversity,true);
+  assert.equal(result.trace.candidate_episode_count,3);
+  assert.equal(result.trace.selected_episode_count,3);
+  assert.equal(result.trace.selection_mode,'episode_diverse_hybrid_lexical_embedding');
+});
+
 test('retrieval diversity does not merge different values, negation or measurements',()=>{
   const memories=[node('fasting-12','患者空腹血糖为12 mmol/L。'),node('fasting-13','患者空腹血糖为13 mmol/L。'),node('no-dry','患者最近没有明显口干症状。'),node('dry','患者最近有明显口干症状。'),node('post-13','患者餐后血糖为13 mmol/L。')],scores=new Map(memories.map((item,index)=>[item.memory_id,1-index/20])),result=retrieveMemoryCandidates({question_request:createQuestionRequest('Q'),instruction:{temporal:{operator:'exact',date_keys:['2024-01-01']}}},memories,{limit:5,semantic_scores:scores,semantic_top_k:5});
   assert.deepEqual(new Set(result.memory_nodes.map(item=>item.memory_id)),new Set(memories.map(item=>item.memory_id)));assert.equal(result.trace.near_duplicate_candidate_count,0);
@@ -109,6 +128,16 @@ test('an exact date keeps synonymously worded patient facts inside the structura
   const result=retrieveMemoryCandidates({question_request:createQuestionRequest('患者自2024/1/5开始出现什么症状？'),instruction:{search_terms:['症状'],source_types:['patient'],required_families:['PE'],temporal:{operator:'exact',date_keys:['2024-01-05']}}},memories);
   assert.deepEqual(new Set(result.memory_nodes.map(item=>item.memory_id)),new Set(['vague','vision']));
   assert.equal(result.trace.lexical_filter_mode,'rank_within_exact_scope');
+});
+
+test('Search and Refine apply exact and month scopes to MedLoCoMo future-year event times',()=>{
+  const memories=[node('admission-start','患者入院。',{event_time:'2132-09-23T08:00:00Z'}),node('admission-end','患者出院。',{event_time:'2132-10-03'}),node('upper-bound','患者远期复查。',{event_time:'2209-12-31'})];
+  const exact=retrieveMemoryCandidates({question_request:createQuestionRequest('Q'),instruction:{temporal:{operator:'exact',date_keys:['2132-09-23']}}},memories);
+  assert.deepEqual(exact.memory_nodes.map(item=>item.memory_id),['admission-start']);
+  const month=retrieveMemoryCandidates({question_request:createQuestionRequest('Q'),instruction:{temporal:{operator:'range',month_keys:['2209-12']}}},memories);
+  assert.deepEqual(month.memory_nodes.map(item=>item.memory_id),['upper-bound']);
+  const refined=createMemoryInvestigationWorkers({question_request:createQuestionRequest('患者在2132年10月的住院记录是什么？'),memory_nodes:memories}).refine.run({state:{snapshot:{memory_nodes:memories,memory_edges:[]}},instruction:{temporal:{operator:'range',month_keys:['2132-10']}}});
+  assert.deepEqual(refined.snapshot.memory_nodes.map(item=>item.memory_id),['admission-end']);
 });
 
 test('an exact date semantically ranks every in-scope State before applying the 24-State cutoff',()=>{

@@ -2,6 +2,8 @@
 // claims. These checks are deliberately conservative: citations must support
 // the whole patient-specific statement, not merely share one short token.
 
+import { canonicalCalendarDate,canonicalCalendarMonth } from './temporal-expressions.js';
+
 const PATIENT_ASSERTION_PATTERN=/(?:患者|该患者|此患者|本人|您|你|目前|当前|近期|最近|既往|曾经|已经|已确诊|确诊为|诊断为|开始|加用|停用|改用|增加剂量|减少剂量|检查显示|结果为|升至|降至|发生了|出现了)/iu;
 const NEGATION_GROUPS=[['无','没有','未','否认','不存在'],['不再','停止','停用','取消'],['未见','未发现','没发现']];
 const DIRECTIONAL_SEMANTIC_GROUPS=[
@@ -71,7 +73,7 @@ function claimStatements(value){
 }
 
 function numericTokens(value){
-  return[...String(value||'').matchAll(/(?:20\d{2}[-/.]\d{1,2}(?:[-/.]\d{1,2})?|\d+(?:\.\d+)?(?:\s*[-–—~～至到]\s*\d+(?:\.\d+)?)?\s*(?:%|mmol\s*\/\s*l|mg\s*\/\s*d(?:l|L)|mg\s*\/\s*g|pmol\s*\/\s*l|u\s*\/\s*ml|mmhg|kg|斤|次\s*\/\s*分|bpm|℃|°c|毫克|克|片|单位|次|天|月|年)?)/giu)].map(match=>match[0].trim()).filter(token=>/\d/u.test(token));
+  return[...String(value||'').matchAll(/(?:\d{4}[-/.]\d{1,2}(?:[-/.]\d{1,2})?|\d+(?:\.\d+)?(?:\s*[-–—~～至到]\s*\d+(?:\.\d+)?)?\s*(?:%|mmol\s*\/\s*l|mg\s*\/\s*d(?:l|L)|mg\s*\/\s*g|pmol\s*\/\s*l|u\s*\/\s*ml|mmhg|kg|斤|次\s*\/\s*分|bpm|℃|°c|毫克|克|片|单位|次|天|月|年)?)/giu)].map(match=>match[0].trim()).filter(token=>/\d/u.test(token));
 }
 
 function latinTokens(value){
@@ -96,9 +98,7 @@ function protectedTokenSupported(token,source){
 }
 
 function canonicalDate(value){
-  const match=/^(?<year>20\d{2})[-/.](?<month>\d{1,2})(?:[-/.](?<day>\d{1,2}))?$/u.exec(String(value||'').trim());
-  if(!match)return'';
-  return`${match.groups.year}-${String(Number(match.groups.month)).padStart(2,'0')}${match.groups.day?`-${String(Number(match.groups.day)).padStart(2,'0')}`:''}`;
+  return canonicalCalendarDate(value)||canonicalCalendarMonth(value);
 }
 
 function contentText(value){

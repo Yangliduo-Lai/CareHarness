@@ -1,8 +1,31 @@
 import { createHash } from 'node:crypto';
+import { existsSync,readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import {
+  MEDLOCOMO_EMBEDDING_BASE_MODEL,
+  MEDLOCOMO_EMBEDDING_BASE_MODEL_REVISION,
+  MEDLOCOMO_EMBEDDING_CHUNK_TURNS,
+  MEDLOCOMO_EMBEDDING_DIMENSION,
+  MEDLOCOMO_EMBEDDING_MODEL,
+  MEDLOCOMO_EMBEDDING_MODEL_REVISION,
+  MEDLOCOMO_EMBEDDING_SNAPSHOT_FILE_HASHES,
+  MEDLOCOMO_EMBEDDING_SNAPSHOT_HASH,
+} from './embedding-retrieval.js';
 import { assertNoHiddenBenchmarkInput } from './information-boundary.js';
 import { LEARNED_ACTION_PRIOR_ADVICE } from './prompts.js';
 
 export const ACTION_POLICY_MODEL_VERSION='careharness-action-value-model.v4-hierarchical-relative-return';
+export const MEDLOCOMO_ACTION_POLICY_MODEL_VERSION='careharness-medlocomo-action-value-model.v3-counterfactual-graph-rollout';
+export const MEDLOCOMO_ACTION_POLICY_DEFAULT_PATH='data/medlocomo-hierarchical-distillation/graph-action-policy-97train-4validation.json';
+const MEDLOCOMO_ACTION_POLICY_MODEL_VERSIONS=new Set([
+  MEDLOCOMO_ACTION_POLICY_MODEL_VERSION,
+  'careharness-medlocomo-action-value-model.v2-counterfactual-graph-rollout',
+]);
+const MEDLOCOMO_FIXED_VALIDATION_COMMITMENT='166669200359c91649418b44453686a9a0a867e2e622001e4cc8666b81393912';
+const MEDLOCOMO_FIXED_VALIDATION_PATIENT_COUNT=4;
+const MEDLOCOMO_FIXED_VALIDATION_CASE_COUNT=516;
+const MEDLOCOMO_FIXED_VALIDATION_EXACT_TURN_CASE_COUNT=258;
+const MEDLOCOMO_EMBEDDING_RUNTIME_CONTRACT=Object.freeze({provider:'local',model:MEDLOCOMO_EMBEDDING_MODEL,model_revision:MEDLOCOMO_EMBEDDING_MODEL_REVISION,model_revision_verification:'local_snapshot_sha256',base_model:MEDLOCOMO_EMBEDDING_BASE_MODEL,base_model_revision:MEDLOCOMO_EMBEDDING_BASE_MODEL_REVISION,snapshot_hash:MEDLOCOMO_EMBEDDING_SNAPSHOT_HASH,snapshot_file_hashes:MEDLOCOMO_EMBEDDING_SNAPSHOT_FILE_HASHES,normalized:true,dimension:MEDLOCOMO_EMBEDDING_DIMENSION,admission_chunk_turn_count:MEDLOCOMO_EMBEDDING_CHUNK_TURNS});
 const LEGACY_ACTION_POLICY_MODEL_VERSIONS=new Set([
   'careharness-action-value-model.v2-relative-return',
   'careharness-action-value-model.v3-query-type-relative-return',
@@ -37,6 +60,57 @@ export function abstractActionPolicyState(input={}){
 }
 
 export function actionPolicyStateKey(input={}){return serializeState(abstractActionPolicyState(input));}
+
+/**
+ * MedLoCoMo uses a separately trained control state.  It contains only values
+ * observable by the live policy after each worker call; official Evidence,
+ * Gold, Patient/QA identity and source IDs are deliberately absent.
+ */
+export function abstractMedLoCoMoActionPolicyState(input={}){
+  const information=input.current_information||{},steps=array(input.previous_steps),assessment=information.assessment||null,verification=information.verification||null,last=steps.at(-1)||null,nodes=array(information.memory_nodes),episodes=new Set(nodes.map(node=>String(node?.episode_id||'')).filter(Boolean)),signal=information.worker_state||{},discoveryCount=steps.filter(step=>DISCOVERY_WORKERS.has(String(step?.worker||''))).length,assessmentCount=steps.filter(step=>step?.worker==='assess').length;
+  return{
+    query_type:normalizeQueryType(input.query_type||information.strategy_profile?.query_type),
+    node_count:bucket(nodes.length,[0,4,12,24],['none','small','medium','bounded','overflow']),
+    episode_count:bucket(episodes.size,[0,1,2,4],['none','one','two','several','many']),
+    assessment:assessmentStatus(assessment),
+    missing_count:bucket(array(assessment?.missing_information).filter(Boolean).length,[0,1,2],['none','one','two','many']),
+    verification:verificationStatus(verification),
+    last_worker:String(last?.worker||signal.last_worker||'none'),
+    last_changed:last?changeStatus(last.changed):'none',
+    stalled_discovery:bucket(noProgressDiscoveryStreak(steps),[0,1],['none','one','repeated']),
+    discovery_count:bucket(discoveryCount,[0,1,2],['none','one','two','many']),
+    assessment_count:bucket(assessmentCount,[0,1],['none','one','repeated']),
+    candidate_count:bucket(Number(signal?.candidate_count??signal?.trace?.candidate_count??0),[0,8,24,48],['none','few','bounded','many','very_many']),
+    selected_episode_count:bucket(Number(signal?.selected_episode_count??signal?.trace?.selected_episode_count??episodes.size),[0,1,2,4],['none','one','two','several','many']),
+    remaining_budget:bucket(Number(input.remaining_budget||0),[1,3,6],['last','low','medium','high']),
+  };
+}
+
+export function medLoCoMoActionPolicyStateKey(input={}){return serializeState(abstractMedLoCoMoActionPolicyState(input));}
+
+/** Load an explicitly requested policy artifact. Nothing is auto-discovered. */
+export function loadActionPolicyModel(path,{expected_benchmark=null}={}){
+  const artifactPath=resolve(String(path||''));
+  if(!String(path||'').trim())throw new Error('Action-policy artifact path is required');
+  let model;
+  try{model=JSON.parse(readFileSync(artifactPath,'utf8'));}
+  catch(error){throw new Error(`Cannot load action-policy artifact ${artifactPath}: ${String(error?.message||error)}`);}
+  validateActionPolicyModel(model);
+  if(expected_benchmark&&model.training_scope?.benchmark!==expected_benchmark)throw new Error(`Action-policy artifact benchmark must be ${expected_benchmark}`);
+  return model;
+}
+
+/** Probe the fixed default without turning a rejected candidate into runtime control. */
+export function loadDefaultMedLoCoMoActionPolicy({path=MEDLOCOMO_ACTION_POLICY_DEFAULT_PATH}={}){
+  const artifactPath=resolve(path);
+  if(!existsSync(artifactPath))return{status:'not_found',path:artifactPath,model:null,model_hash:null,execution:null,reason:'artifact_not_found'};
+  try{
+    const model=loadActionPolicyModel(artifactPath,{expected_benchmark:'medlocomo'}),greedy=medLoCoMoActionPolicyAcceptance(model),advisory=medLoCoMoActionPolicyAdvisoryAcceptance(model);
+    if(greedy.accepted)return{status:'loaded',path:artifactPath,model,model_hash:model.model_hash,execution:'greedy_worker',reason:'accepted'};
+    if(advisory.accepted)return{status:'loaded',path:artifactPath,model,model_hash:model.model_hash,execution:'advisory',reason:'experimental_advisory'};
+    return{status:'rejected',path:artifactPath,model:null,model_hash:model.model_hash,execution:null,reason:advisory.reason};
+  }catch(error){return{status:'rejected',path:artifactPath,model:null,model_hash:null,execution:null,reason:`invalid_artifact: ${String(error?.message||error)}`};}
+}
 
 export function learnActionPolicyModel(experiments=[],options={}){
   const rows=[],trajectories=[],trainingHashes=[],trainingPersonas=new Set(),trainingSplits=new Set(),exclusionCounts={non_score_result:0,judge_infrastructure_failure:0,memory_incomplete:0,unscored_or_non_numeric:0,incomplete_or_invalid_trajectory:0};
@@ -75,7 +149,7 @@ export function learnActionPolicyModel(experiments=[],options={}){
 export function withLearnedActionPrior(input={},model=null){
   if(!model)return input;
   validateActionPolicyModel(model);
-  const state=abstractActionPolicyState(input),exact=array(model.contexts?.[serializeState(state)]),backoff=array(model.backoff_contexts?.[serializeState(backoffState(state))]),global=array(model.global_actions),allowed=[...new Set(array(input.allowed_workers).map(String))],ranked=allowed.map(worker=>valueForWorker(worker,exact,backoff,global)).filter(Boolean).sort((left,right)=>right.estimated_value-left.estimated_value||right.support-left.support||left.worker.localeCompare(right.worker)),margin=ranked.length>1?ranked[0].estimated_value-ranked[1].estimated_value:0,support=ranked[0]?.support||0,comparisonQuality=actionPolicyComparisonQuality(model),confidence=round(Math.min(.8,(support/(support+4))*(.25+Math.max(0,margin)))*comparisonQuality.reliability);
+  const medLoCoMo=model.training_scope?.benchmark==='medlocomo',state=medLoCoMo?abstractMedLoCoMoActionPolicyState(input):abstractActionPolicyState(input),backoffStateValue=medLoCoMo?medLoCoMoBackoffState(state):backoffState(state),exact=array(model.contexts?.[serializeState(state)]),backoff=array(model.backoff_contexts?.[serializeState(backoffStateValue)]),global=array(model.global_actions),allowed=[...new Set(array(input.allowed_workers).map(String))],ranked=allowed.map(worker=>valueForWorker(worker,exact,backoff,global)).filter(Boolean).sort((left,right)=>right.estimated_value-left.estimated_value||right.support-left.support||left.worker.localeCompare(right.worker)),margin=ranked.length>1?ranked[0].estimated_value-ranked[1].estimated_value:0,support=ranked[0]?.support||0,comparisonQuality=actionPolicyComparisonQuality(model),confidence=round(Math.min(.8,(support/(support+4))*(.25+Math.max(0,margin)))*comparisonQuality.reliability);
   const learned_action_prior={version:ACTION_POLICY_PRIOR_VERSION,model_hash:model.model_hash,source:ranked[0]?.value_source||'none',confidence,comparison_quality:comparisonQuality,advice:LEARNED_ACTION_PRIOR_ADVICE,ranked_actions:ranked};
   const output={...input,learned_action_prior};
   assertNoHiddenBenchmarkInput(output,'investigation_policy_with_learned_prior');
@@ -98,7 +172,43 @@ export function actionPolicyLearningManifest(model=null){
   return{enabled:true,version:model.version,model_hash:model.model_hash,training_scope:model.training_scope,state_features:model.state_features,prior_strength:model.prior_strength};
 }
 
+/**
+ * Keep a failed candidate available for offline diagnosis, but require a
+ * patient-disjoint non-inferiority result before it can control a live greedy
+ * rollout.  Recomputing the decision here prevents a hand-edited boolean from
+ * bypassing the gate.
+ */
+export function medLoCoMoActionPolicyAcceptance(model){
+  if(model?.training_scope?.benchmark!=='medlocomo')return{accepted:false,reason:'not_medlocomo'};
+  const facts=medLoCoMoAcceptanceFacts(model),validation=model.validation||{},scope=model.training_scope||{},applicable=facts.retrievalApplicable&&validation.applies_to_serialized_model===true&&validation.runtime_environment_parity===true,metricsAccepted=applicable&&facts.nonInferior&&facts.strict,declared=validation.accepted===true&&scope.deployment_eligible===true;
+  return acceptanceResult({facts,applicable,metricsAccepted,declared,undeclaredReason:'artifact_not_marked_deployable'});
+}
+
+/** A full offline retrieval-stack A/B may advise the Policy LLM, never force a worker. */
+export function medLoCoMoActionPolicyAdvisoryAcceptance(model){
+  if(model?.training_scope?.benchmark!=='medlocomo')return{accepted:false,reason:'not_medlocomo'};
+  const facts=medLoCoMoAcceptanceFacts(model),validation=model.validation||{},scope=model.training_scope||{},applicable=facts.retrievalApplicable&&validation.retrieval_stack_parity===true,metricsAccepted=applicable&&facts.nonInferior&&facts.strict,declared=validation.experimental_advisory_accepted===true&&scope.advisory_eligible===true;
+  return acceptanceResult({facts,applicable,metricsAccepted,declared,undeclaredReason:'artifact_not_marked_advisory'});
+}
+
+function medLoCoMoAcceptanceFacts(model){
+  const validation=model.validation||{},scope=model.training_scope||{},delta=validation.learned_minus_baseline||{},raw=[delta.exact_turn_recall,delta.all_evidence_rate,delta.mean_action_cost],finite=raw.every(finiteNumber),[exact,allEvidence,cost]=finite?raw:[NaN,NaN,NaN],productionGraph=['frozen_production_sqlite','frozen_production_sqlite_v1_plus_deterministic_v2_literal_migration'].includes(String(validation.validation_graph_source||'')),fullFixedHoldout=exactNumber(validation.patient_count,MEDLOCOMO_FIXED_VALIDATION_PATIENT_COUNT)&&exactNumber(validation.case_count,MEDLOCOMO_FIXED_VALIDATION_CASE_COUNT)&&exactNumber(validation.exact_turn_case_count,MEDLOCOMO_FIXED_VALIDATION_EXACT_TURN_CASE_COUNT)&&String(scope.validation_set_commitment||'')===MEDLOCOMO_FIXED_VALIDATION_COMMITMENT&&exactNumber(scope.patient_count,97),pairwiseSplitAligned=validation.pairwise_valid_for_held_out_claims===true&&validation.pairwise_validation_patients_included===false&&exactNumber(validation.pairwise_train_patient_count,97)&&exactNumber(validation.pairwise_validation_patient_count,4)&&String(validation.pairwise_train_set_commitment||'')===String(scope.train_set_commitment||'')&&String(validation.pairwise_validation_set_commitment||'')===String(scope.validation_set_commitment||''),instructionSplitAligned=exactNumber(validation.instruction_policy_train_patient_count,97)&&exactNumber(validation.instruction_policy_validation_patient_count,4)&&String(validation.instruction_policy_train_set_commitment||'')===String(scope.train_set_commitment||'')&&String(validation.instruction_policy_validation_set_commitment||'')===String(scope.validation_set_commitment||'')&&validation.instruction_policy_final_refit===false,runtimeExecuted=validMedLoCoMoRuntimeExecution(validation.runtime_stack_execution)&&validMedLoCoMoInstructionExecution(validation)&&validation.embedding_runtime_contract_matched===true,retrievalApplicable=validation.patient_disjoint===true&&validation.validation_graph_memory_compatible===true&&productionGraph&&validation.production_pairwise_ranker_used===true&&validation.production_embedding_selector_used===true&&validation.production_instruction_policy_used===true&&fullFixedHoldout&&pairwiseSplitAligned&&instructionSplitAligned&&runtimeExecuted,nonInferior=finite&&exact>=0&&allEvidence>=0&&cost<=0,strict=finite&&(exact>0||allEvidence>0||cost<0);
+  return{finite,nonInferior,strict,retrievalApplicable};
+}
+function acceptanceResult({facts,applicable,metricsAccepted,declared,undeclaredReason}){return{accepted:metricsAccepted&&declared,metrics_accepted:metricsAccepted,declared_eligible:declared,reason:!facts.finite?'validation_metrics_missing':!applicable?'validation_not_applicable':!facts.nonInferior?'held_out_non_inferiority_failed':!facts.strict?'no_held_out_improvement':!declared?undeclaredReason:'accepted'};}
+
+function validMedLoCoMoRuntimeExecution(value){
+  if(!value||typeof value!=='object')return false;
+  const attempted=value.embedding_attempted,completed=value.embedding_completed,failed=value.embedding_failed,pairwiseAttempted=value.pairwise_attempted,pairwiseApplied=value.pairwise_applied,pairwiseFailed=value.pairwise_failed;
+  return finiteNumber(attempted)&&attempted>0&&completed===attempted&&failed===0&&finiteNumber(pairwiseAttempted)&&pairwiseAttempted>0&&pairwiseApplied===pairwiseAttempted&&pairwiseFailed===0&&value.embedding_expected_dimensions===MEDLOCOMO_EMBEDDING_RUNTIME_CONTRACT.dimension&&singleton(value.embedding_observed_dimensions,MEDLOCOMO_EMBEDDING_RUNTIME_CONTRACT.dimension)&&singleton(value.embedding_observed_providers,MEDLOCOMO_EMBEDDING_RUNTIME_CONTRACT.provider)&&singleton(value.embedding_observed_models,MEDLOCOMO_EMBEDDING_RUNTIME_CONTRACT.model)&&singleton(value.embedding_observed_model_revisions,MEDLOCOMO_EMBEDDING_RUNTIME_CONTRACT.model_revision)&&singleton(value.embedding_observed_model_revision_verifications,MEDLOCOMO_EMBEDDING_RUNTIME_CONTRACT.model_revision_verification)&&singleton(value.embedding_observed_base_models,MEDLOCOMO_EMBEDDING_RUNTIME_CONTRACT.base_model)&&singleton(value.embedding_observed_base_model_revisions,MEDLOCOMO_EMBEDDING_RUNTIME_CONTRACT.base_model_revision)&&singleton(value.embedding_observed_snapshot_hashes,MEDLOCOMO_EMBEDDING_RUNTIME_CONTRACT.snapshot_hash)&&singleton(value.embedding_observed_snapshot_file_hash_commitments,sha256(stableJson(MEDLOCOMO_EMBEDDING_RUNTIME_CONTRACT.snapshot_file_hashes)))&&singleton(value.embedding_observed_normalized,true)&&singleton(value.embedding_observed_chunk_turn_counts,MEDLOCOMO_EMBEDDING_RUNTIME_CONTRACT.admission_chunk_turn_count);
+}
+function validMedLoCoMoInstructionExecution(validation){const value=validation.runtime_stack_execution||{},attempted=value.instruction_prior_attempted;return finiteNumber(attempted)&&attempted>0&&value.instruction_prior_completed===attempted&&value.instruction_prior_failed===0&&singleton(value.instruction_prior_observed_artifact_hashes,String(validation.production_instruction_policy_artifact_hash||''));}
+function finiteNumber(value){return typeof value==='number'&&Number.isFinite(value);}
+function exactNumber(value,expected){return finiteNumber(value)&&value===expected;}
+function singleton(value,expected){return Array.isArray(value)&&value.length===1&&value[0]===expected;}
+
 export function validateActionPolicyModel(model){
+  if(MEDLOCOMO_ACTION_POLICY_MODEL_VERSIONS.has(model?.version)){validateMedLoCoMoActionPolicyModel(model);assertSafeLearnedModel(model);return model;}
   if(!model||model.version!==ACTION_POLICY_MODEL_VERSION&&!LEGACY_ACTION_POLICY_MODEL_VERSIONS.has(model.version))throw new Error(`Unsupported action-policy model version: ${model?.version||'<missing>'}`);
   if(model.training_scope?.benchmark!=='medmemorybench'||model.training_scope?.noise!==false)throw new Error('Action-policy model must be trained only on MedMemoryBench Clean trajectories');
   if(model.training_scope?.uses_question_text!==false||model.training_scope?.uses_gold_or_judge_content!==false)throw new Error('Action-policy model violates the runtime information boundary');
@@ -106,6 +216,46 @@ export function validateActionPolicyModel(model){
   if(model.version!=='careharness-action-value-model.v2-relative-return'&&model.training_scope?.uses_task_label!==true)throw new Error('Type-adaptive action-policy model must disclose task-label conditioning');
   assertSafeLearnedModel(model);
   return model;
+}
+
+function validateMedLoCoMoActionPolicyModel(model){
+  const scope=model?.training_scope||{};
+  if(scope.benchmark!=='medlocomo'||scope.runtime_eligible!==true||scope.counterfactual_worker_rollout!==true)throw new Error('MedLoCoMo action-policy model requires a runtime-eligible counterfactual worker rollout');
+  if(scope.runtime_uses_question_text!==false||scope.runtime_uses_gold_or_judge_content!==false||scope.runtime_retains_case_content!==false)throw new Error('MedLoCoMo action-policy model violates the runtime information boundary');
+  if(!Number.isInteger(Number(scope.patient_count))||Number(scope.patient_count)<1||!Number.isInteger(Number(scope.rollout_case_count))||Number(scope.rollout_case_count)<1)throw new Error('MedLoCoMo action-policy model has invalid training counts');
+  if(!Array.isArray(model.state_features)||!model.state_features.length||!Array.isArray(model.global_actions)||!model.global_actions.length)throw new Error('MedLoCoMo action-policy model is empty');
+  const expectedFeatures=Object.keys(abstractMedLoCoMoActionPolicyState({})).sort(),actualFeatures=[...model.state_features].map(String).sort();
+  if(JSON.stringify(actualFeatures)!==JSON.stringify(expectedFeatures))throw new Error('MedLoCoMo action-policy model has an incompatible runtime state schema');
+  validateMedLoCoMoValueTable(model.contexts,expectedFeatures,'contexts');
+  validateMedLoCoMoValueTable(model.backoff_contexts,['query_type','node_count','episode_count','assessment','verification','last_worker','last_changed','remaining_budget'],'backoff_contexts');
+  validateMedLoCoMoActionRows(model.global_actions,'global_actions');
+  const acceptance=medLoCoMoActionPolicyAcceptance(model);
+  const advisoryAcceptance=medLoCoMoActionPolicyAdvisoryAcceptance(model);
+  if((model.validation?.accepted===true||scope.deployment_eligible===true)&&!acceptance.metrics_accepted)throw new Error(`MedLoCoMo Action policy cannot be marked deployable: ${acceptance.reason}`);
+  if(Boolean(model.validation?.accepted)!==Boolean(scope.deployment_eligible))throw new Error('MedLoCoMo Action policy deployment markers disagree');
+  if((model.validation?.experimental_advisory_accepted===true||scope.advisory_eligible===true)&&!advisoryAcceptance.metrics_accepted)throw new Error(`MedLoCoMo Action policy cannot be marked advisory: ${advisoryAcceptance.reason}`);
+  if(Boolean(model.validation?.experimental_advisory_accepted)!==Boolean(scope.advisory_eligible))throw new Error('MedLoCoMo Action policy advisory markers disagree');
+  const body={...model};delete body.model_hash;
+  if(!/^[a-f0-9]{64}$/u.test(String(model.model_hash||''))||sha256(stableJson(body))!==model.model_hash)throw new Error('MedLoCoMo action-policy artifact hash does not match its contents');
+}
+
+function validateMedLoCoMoValueTable(table,features,label){
+  if(!table||typeof table!=='object'||Array.isArray(table))throw new Error(`MedLoCoMo ${label} must be an object`);
+  const expected=[...features].sort();
+  for(const[key,rows]of Object.entries(table)){
+    const fields=Object.fromEntries(String(key).split('|').map(part=>{const index=part.indexOf('=');if(index<1)throw new Error(`MedLoCoMo ${label} contains an invalid state key`);return[part.slice(0,index),part.slice(index+1)];})),actual=Object.keys(fields).sort();
+    if(JSON.stringify(actual)!==JSON.stringify(expected))throw new Error(`MedLoCoMo ${label} contains an incompatible state key`);
+    validateMedLoCoMoStateValues(fields,label);validateMedLoCoMoActionRows(rows,label);
+  }
+}
+function validateMedLoCoMoStateValues(fields,label){
+  const enums={query_type:['medical_reasoning','care_plan_rationale','longitudinal_progression','cross_admission_comparison','frequency_pattern','adversarial','unknown'],node_count:['none','small','medium','bounded','overflow'],episode_count:['none','one','two','several','many'],assessment:['none','supported','partial','unresolved','other'],missing_count:['none','one','two','many'],verification:['none','complete','incomplete','overflow'],last_worker:['none','search','context','trace','assess','refine','verify','answer'],last_changed:['none','yes','no','unknown'],stalled_discovery:['none','one','repeated'],discovery_count:['none','one','two','many'],assessment_count:['none','one','repeated'],candidate_count:['none','few','bounded','many','very_many'],selected_episode_count:['none','one','two','several','many'],remaining_budget:['last','low','medium','high']};
+  for(const[key,value]of Object.entries(fields))if(!enums[key]?.includes(value))throw new Error(`MedLoCoMo ${label} contains an invalid ${key} value`);
+}
+function validateMedLoCoMoActionRows(rows,label){
+  if(!Array.isArray(rows)||!rows.length)throw new Error(`MedLoCoMo ${label} contains no Action values`);
+  const seen=new Set(),allowed=new Set(['search','context','trace','assess','refine','verify','answer']);
+  for(const row of rows){const worker=String(row?.worker||'');if(!allowed.has(worker)||seen.has(worker)||!Number.isInteger(Number(row?.count))||Number(row.count)<1||!Number.isFinite(Number(row?.mean))||Number(row.mean)<0||Number(row.mean)>1)throw new Error(`MedLoCoMo ${label} contains an invalid Action value`);seen.add(worker);}
 }
 
 export function actionPolicyTrajectoryEligibility(result){
@@ -129,6 +279,7 @@ function meanByAction(actions){return Object.fromEntries(Object.entries(actions)
 function posteriorValues(groups,globalMeans,priorStrength){return Object.fromEntries(Object.entries(groups).map(([key,actions])=>[key,Object.entries(actions).map(([worker,value])=>({worker,count:value.count,effective_weight:round(value.weight_sum),mean:round((value.sum+priorStrength*Number(globalMeans[worker]||0))/(value.weight_sum+priorStrength))})).sort((left,right)=>right.mean-left.mean||right.effective_weight-left.effective_weight||left.worker.localeCompare(right.worker))]));}
 function valueForWorker(worker,exact,backoff,global){for(const[value_source,values]of[['exact',exact],['backoff',backoff],['global',global]]){const value=values.find(item=>String(item?.worker||'')===worker);if(value)return{worker,estimated_value:round(Number(value.mean||0)),support:Number(value.count||0),value_source};}return{worker,estimated_value:.5,support:0,value_source:'unobserved'};}
 function backoffState(state){return{node_count:state.node_count,assessment:state.assessment,verification:state.verification,last_worker:state.last_worker,last_changed:state.last_changed,remaining_budget:state.remaining_budget};}
+function medLoCoMoBackoffState(state){return{query_type:state.query_type,node_count:state.node_count,episode_count:state.episode_count,assessment:state.assessment,verification:state.verification,last_worker:state.last_worker,last_changed:state.last_changed,remaining_budget:state.remaining_budget};}
 function serializeState(value){return Object.keys(value).sort().map(key=>`${key}=${String(value[key])}`).join('|');}
 function assessmentStatus(value){const status=String(value?.assessment||'none').toLowerCase();return['supported','partial','unresolved'].includes(status)?status:value?'other':'none';}
 function verificationStatus(value){if(!value)return'none';if(value.overflow===true||value.requires_refine===true)return'overflow';return value.complete===true?'complete':'incomplete';}
@@ -146,6 +297,7 @@ function trainingExclusionReason(result){
   return null;
 }
 function actionPolicyComparisonQuality(model){
+  if(MEDLOCOMO_ACTION_POLICY_MODEL_VERSIONS.has(model.version)){const validation=model.validation||null,accuracy=Number(validation?.one_step_best_action_accuracy),regret=Number(validation?.one_step_mean_action_regret),facts=medLoCoMoAcceptanceFacts(model),greedyScope=facts.retrievalApplicable&&validation?.runtime_environment_parity===true&&validation?.applies_to_serialized_model===true,advisoryScope=!greedyScope&&facts.retrievalApplicable&&validation?.retrieval_stack_parity===true,hasValidation=validation?.patient_disjoint===true&&(greedyScope||advisoryScope)&&Number.isFinite(accuracy)&&Number.isFinite(regret),mode=greedyScope?'patient_disjoint_counterfactual_graph_rollout':advisoryScope?'patient_disjoint_retrieval_stack_advisory':'unvalidated_or_post_validation_refit',ceiling=advisoryScope?.6:1;return{mode,within_question_fraction:null,reliability:hasValidation?round(clamp(accuracy*(1-Math.max(0,regret)),.2,ceiling)):.2};}
   if(model.version!==ACTION_POLICY_MODEL_VERSION)return{mode:'legacy_unspecified',within_question_fraction:null,reliability:1};
   const counts=model.training_scope?.comparison_mode_counts||{},within=Math.max(0,Number(counts.within_question)||0),cross=Math.max(0,Number(counts.cross_case_query_type)||0),raw=Math.max(0,Number(counts.calibrated_raw_score)||0),total=within+cross+raw,fraction=total?within/total:0;
   return{mode:fraction===1?'within_question':fraction>0?'mixed':cross>0?'cross_case_only':'calibrated_raw_only',within_question_fraction:round(fraction),reliability:round(.2+.8*fraction)};

@@ -56,6 +56,12 @@ test('MedLoCoMo and CPCD retain protocol inputs outside core observations',()=>{
   assert.ok(cpcdCases.some(item=>item.metadata.protocol_only===true));assert.ok(cpcdCases.every(item=>item.metadata.answer_contract));
 });
 
+test('MedLoCoMo can select exact query IDs for bounded diagnostics',()=>{
+  const all=A.medlocomo.load({patient_id:'16957952'}),queryIds=all.queries.slice(0,2).map(item=>String(item.qa_id)),selected=A.medlocomo.cases(all,{query_ids:queryIds});
+  assert.deepEqual(selected.map(item=>item.score_id),queryIds);
+  assert.throws(()=>A.medlocomo.load({patient_id:'16957952',query_id:'missing-query'}),/does not contain query_id/);
+});
+
 test('all adapters emit the same minimal core observation shape',()=>{
   const samples=[A.medmemorybench.load({persona_id:1,max_session:1}),A.medlocomo.load({patient_id:'16957952'}),A.cpcdbench.load({case_id:'张明_261'})],expected=['episode_id','event_time','raw_text','source_type','subject_id','turn_id'];
   for(const sample of samples){assert.ok(sample.observations.length);assert.deepEqual(Object.keys(sample.observations[0]).sort(),expected);}

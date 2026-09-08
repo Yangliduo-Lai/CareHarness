@@ -22,6 +22,7 @@ const TASKS = [
 const TASK_ABBR = Object.fromEntries(TASKS.map(([key, abbr]) => [key, abbr]));
 const EXPECTED_TOTAL = 395;
 const LONG_CONTEXT_TOKEN_ESTIMATE = Object.freeze({
+  kind: 'long_context',
   inputTokensLow: 36_553_161,
   inputTokensHigh: 37_934_093,
   outputTokensLow: 553_440,
@@ -143,7 +144,12 @@ const lettaCheckpointPaths = [1, 3, 5, 7].map(persona => resolve(
   root,
   `reports/official-baselines/qwen3.7-plus/sharded-8/letta/persona-${persona}/checkpoints/medmemorybench/letta_qwen3.7-plus/checkpoint.json`,
 )).filter(existsSync);
-const letta = aggregateCheckpoints(lettaCheckpointPaths, 'Letta（当前断点）');
+const letta = aggregateCheckpoints(lettaCheckpointPaths, 'Letta（已暂停断点）');
+const lettaLogPaths = [1, 3, 5, 7].map(persona => resolve(
+  root,
+  `reports/official-baselines/qwen3.7-plus/sharded-8/letta/persona-${persona}/process.log`,
+)).filter(existsSync);
+letta.tokenEstimate = estimateLettaTokenUsage(lettaLogPaths, letta);
 
 const amemCheckpointPaths = [
   'reports/official-baselines/qwen3.7-plus/full-persona-1-3-5-7/amem/checkpoints/medmemorybench/amem_qwen3.7-plus/checkpoint.json',
@@ -151,7 +157,17 @@ const amemCheckpointPaths = [
   'reports/official-baselines/qwen3.7-plus/sharded-8/amem/persona-5/checkpoints/medmemorybench/amem_qwen3.7-plus/checkpoint.json',
   'reports/official-baselines/qwen3.7-plus/sharded-8/amem/persona-7/checkpoints/medmemorybench/amem_qwen3.7-plus/checkpoint.json',
 ].map(path => resolve(root, path)).filter(existsSync);
-const amem = aggregateCheckpoints(amemCheckpointPaths, 'A-Mem（当前断点）');
+const amemResultPaths = [
+  'reports/official-baselines/qwen3.7-plus/sharded-8/amem/persona-5/amem_qwen3.7-plus/medmemorybench_amem_qwen3.7-plus_20260902_030736_query_answer.json',
+].map(path => resolve(root, path)).filter(existsSync);
+const amem = aggregateCheckpoints(amemCheckpointPaths, 'A-Mem（已暂停断点）', amemResultPaths);
+const amemSnapshotPaths = [
+  'reports/official-baselines/qwen3.7-plus/full-persona-1-3-5-7/amem/.amem-runtime/context-1.snapshot.json',
+  'reports/official-baselines/qwen3.7-plus/sharded-8/amem/persona-3/.amem-runtime/context-3.snapshot.json',
+  'reports/official-baselines/qwen3.7-plus/sharded-8/amem/persona-5/.amem-runtime/context-5.snapshot.json',
+  'reports/official-baselines/qwen3.7-plus/sharded-8/amem/persona-7/.amem-runtime/context-7.snapshot.json',
+].map(path => resolve(root, path)).filter(existsSync);
+amem.tokenEstimate = estimateAmemTokenUsage(amemSnapshotPaths, amem);
 
 const methods = [careAll, longContext, letta, amem];
 const commit = safeGit(['rev-parse', '--short', 'HEAD']) || 'unknown';
@@ -168,6 +184,7 @@ const html = renderHtml({
   lettaCheckpointPaths,
   invalidLetta,
   amemCheckpointPaths,
+  amemResultPaths,
   commit,
   branch,
   dirtyFiles,
@@ -195,6 +212,11 @@ function emptyAggregate(name, status) {
     mcdCrcWeighted: 0,
     mcdCcWeighted: 0,
     mcdCount: 0,
+    llmJudgedQuestions: 0,
+    estimatedJudgeTokens: 0,
+    retrievedMemoryCount: 0,
+    retrievedMemoryCountByPersona: {},
+    answerOutputEstimatedTokens: 0,
   };
 }
 
@@ -384,10 +406,10 @@ function hasInfrastructureFailure(value) {
   return INFRASTRUCTURE_MARKERS.some(marker => text.includes(marker));
 }
 
-function aggregateCheckpoints(paths, name) {
+function aggregateCheckpoints(paths, name, resultPaths = []) {
   const out = emptyAggregate(name, '部分');
-  const seen = new Set();
   const queryTimes = [];
+  const candidatesByPersona = new Map();
   let newest = null;
   for (const path of paths) {
     let checkpoint;
@@ -395,10 +417,22 @@ function aggregateCheckpoints(paths, name) {
     catch { continue; }
     newest = !newest || String(checkpoint.updated_at || '') > newest ? String(checkpoint.updated_at || '') : newest;
     for (const [persona, rows] of Object.entries(checkpoint.completed_results || {})) {
-      for (const row of rows || []) {
-        const key = `${persona}:${row.query_id}`;
-        if (seen.has(key) || !Number.isFinite(Number(row.score))) continue;
-        seen.add(key);
+      addPersonaCandidate(candidatesByPersona, persona, rows, path);
+    }
+  }
+  for (const path of resultPaths) {
+    let result;
+    try { result = JSON.parse(readFileSync(path, 'utf8')); }
+    catch { continue; }
+    const personas = Object.keys(result.by_context || {});
+    if (personas.length !== 1) continue;
+    addPersonaCandidate(candidatesByPersona, personas[0], result.queries, path);
+  }
+  const selectedSources = [];
+  for (const [persona, candidate] of candidatesByPersona.entries()) {
+    selectedSources.push(candidate.path);
+    for (const row of candidate.rows) {
+        if (!Number.isFinite(Number(row.score))) continue;
         const task = String(row.query_type || '');
         const taskRow = out.byTask[task] || { total: 0, correct: 0, scoreSum: 0, avgScore: null, avgNcr: null, avgCrc: null, avgCc: null };
         taskRow.total += 1;
@@ -414,8 +448,16 @@ function aggregateCheckpoints(paths, name) {
         out.total += 1;
         out.correct += row.is_correct === true ? 1 : 0;
         out.scoreSum += Number(row.score);
+        const retrievedCount = Math.min(Math.max(Number(row.retrieved_count || 0), 0), 5);
+        out.retrievedMemoryCount += retrievedCount;
+        out.retrievedMemoryCountByPersona[persona] = Number(out.retrievedMemoryCountByPersona[persona] || 0) + retrievedCount;
+        out.answerOutputEstimatedTokens += estimateClinicalTextTokens(String(row.model_output || ''));
+        const judgeTokens = estimatedJudgeTokens(task);
+        if (judgeTokens) {
+          out.llmJudgedQuestions += 1;
+          out.estimatedJudgeTokens += judgeTokens;
+        }
         if (Number.isFinite(Number(row.query_time))) queryTimes.push(Number(row.query_time));
-      }
     }
   }
   for (const [task, row] of Object.entries(out.byTask)) {
@@ -435,8 +477,136 @@ function aggregateCheckpoints(paths, name) {
   out.avgCc = mcd?.avgCc ?? null;
   out.updatedAt = newest;
   out.expectedTotal = EXPECTED_TOTAL;
-  out.sourcePaths = paths;
+  out.sourcePaths = [...new Set(selectedSources)];
   return out;
+}
+
+function addPersonaCandidate(candidatesByPersona, persona, rows, path) {
+  const validRows = (Array.isArray(rows) ? rows : []).filter(row => Number.isFinite(Number(row?.score)));
+  const current = candidatesByPersona.get(String(persona));
+  if (!current || validRows.length > current.rows.length) {
+    candidatesByPersona.set(String(persona), { rows: validRows, path });
+  }
+}
+
+function estimateLettaTokenUsage(paths, aggregate) {
+  let recordedAgentTokens = 0;
+  let recordedAgentCalls = 0;
+  let summaryInputTokens = 0;
+  let summaryCalls = 0;
+  let successfulHttpCalls = 0;
+  for (const path of paths) {
+    let text;
+    try { text = readFileSync(path, 'utf8'); }
+    catch { continue; }
+    for (const match of text.matchAll(/last response total_tokens \((\d+)\)/gu)) {
+      recordedAgentTokens += Number(match[1]);
+      recordedAgentCalls += 1;
+    }
+    for (const match of text.matchAll(/desired_token_count_to_summarize=(\d+)/gu)) {
+      summaryInputTokens += Number(match[1]);
+      summaryCalls += 1;
+    }
+    successfulHttpCalls += [...text.matchAll(/HTTP Request: POST .*chat\/completions .*200 OK/gu)].length;
+  }
+  const unattributedCalls = Math.max(successfulHttpCalls - recordedAgentCalls - summaryCalls, 0);
+  const low = recordedAgentTokens + summaryInputTokens + summaryCalls * 500 + unattributedCalls * 2_500;
+  const high = recordedAgentTokens + summaryInputTokens + summaryCalls * 1_500 + unattributedCalls * 8_000;
+  const mid = Math.round((low + high) / 2);
+  return {
+    kind: 'letta_runtime_log_estimate',
+    totalTokensLow: Math.round(low),
+    totalTokensHigh: Math.round(high),
+    totalTokensMid: mid,
+    avgTokensLow: aggregate.total ? Math.round(low / aggregate.total) : null,
+    avgTokensHigh: aggregate.total ? Math.round(high / aggregate.total) : null,
+    avgTokensPerQuestion: aggregate.total ? Math.round(mid / aggregate.total) : null,
+    recordedAgentTokens,
+    recordedAgentCalls,
+    summaryCalls,
+    successfulHttpCalls,
+    unattributedCalls,
+  };
+}
+
+function estimateAmemTokenUsage(paths, aggregate) {
+  let noteCount = 0;
+  let linkedNoteCount = 0;
+  let memoryLow = 0;
+  let memoryHigh = 0;
+  let totalNoteTokens = 0;
+  const avgNoteTokensByPersona = {};
+  for (const path of paths) {
+    let snapshot;
+    try { snapshot = JSON.parse(readFileSync(path, 'utf8')); }
+    catch { continue; }
+    const notes = Array.isArray(snapshot.memories) ? snapshot.memories : [];
+    const noteTokens = notes.map(note => estimateClinicalTextTokens(String(note.content || '')));
+    const contextMatch = basename(path).match(/context-(\d+)\.snapshot\.json$/u);
+    const persona = contextMatch?.[1];
+    if (persona && noteTokens.length) {
+      avgNoteTokensByPersona[persona] = noteTokens.reduce((sum, value) => sum + value, 0) / noteTokens.length;
+    }
+    totalNoteTokens += noteTokens.reduce((sum, value) => sum + value, 0);
+    noteCount += notes.length;
+    for (let index = 0; index < notes.length; index += 1) {
+      const contentTokens = noteTokens[index];
+      // Every note receives metadata analysis. All but the first note in a
+      // context also receive one evolution decision over up to five neighbors.
+      memoryLow += contentTokens + 360;
+      memoryHigh += contentTokens + 360;
+      if (!index) continue;
+      const neighborTokens = noteTokens.slice(Math.max(0, index - 5), index).reduce((sum, value) => sum + value, 0);
+      const evolutionCallTokens = contentTokens + neighborTokens + 550;
+      memoryLow += evolutionCallTokens + 100;
+      memoryHigh += evolutionCallTokens + 100;
+      if (Array.isArray(notes[index].links) && notes[index].links.length) {
+        linkedNoteCount += 1;
+        // A non-empty link proves the conditional strengthen call occurred.
+        memoryLow += evolutionCallTokens + 160;
+        memoryHigh += evolutionCallTokens + 160;
+        // The checkpoint does not retain whether UPDATE_NEIGHBOR also ran.
+        // Treat zero versus one update call as the transparent estimate range.
+        memoryHigh += evolutionCallTokens + 600;
+      }
+    }
+  }
+  const globalAvgNoteTokens = noteCount ? totalNoteTokens / noteCount : 0;
+  let queryInputTokens = aggregate.total * 900;
+  for (const [persona, count] of Object.entries(aggregate.retrievedMemoryCountByPersona || {})) {
+    queryInputTokens += Number(count) * Number(avgNoteTokensByPersona[persona] || globalAvgNoteTokens);
+  }
+  const common = queryInputTokens + aggregate.answerOutputEstimatedTokens + aggregate.estimatedJudgeTokens;
+  const low = Math.round(memoryLow + common);
+  const high = Math.round(memoryHigh + common);
+  const mid = Math.round((low + high) / 2);
+  return {
+    kind: 'amem_snapshot_estimate',
+    totalTokensLow: low,
+    totalTokensHigh: high,
+    totalTokensMid: mid,
+    avgTokensLow: aggregate.total ? Math.round(low / aggregate.total) : null,
+    avgTokensHigh: aggregate.total ? Math.round(high / aggregate.total) : null,
+    avgTokensPerQuestion: aggregate.total ? Math.round(mid / aggregate.total) : null,
+    noteCount,
+    linkedNoteCount,
+    answerCalls: aggregate.total,
+    judgeCalls: aggregate.llmJudgedQuestions,
+  };
+}
+
+function estimateClinicalTextTokens(text) {
+  // The stored MedMemory Chinese/English notes were sampled with cl100k_base:
+  // their token/character ratio is about 1.06. This is an estimate, not usage.
+  return Math.max(Math.round(String(text || '').length * 1.06), text ? 1 : 0);
+}
+
+function estimatedJudgeTokens(task) {
+  if (task === 'temporal_localization') return 2_500;
+  if (task === 'state_update') return 3_000;
+  if (task === 'inference_generation') return 4_500;
+  if (task === 'multi_hop_clinical_deduction') return 9_000;
+  return 0;
 }
 
 function renderHtml(context) {
@@ -449,6 +619,7 @@ function renderHtml(context) {
     lettaCheckpointPaths,
     invalidLetta,
     amemCheckpointPaths,
+    amemResultPaths,
     commit,
     branch,
     dirtyFiles,
@@ -469,10 +640,6 @@ function renderHtml(context) {
       <td class="score avg">${percent(row.avgScore)}</td>
       <td>${row.total}</td>
     </tr>`).join('');
-  const classifierRows = TASKS.map(([task, abbr, label]) => {
-    const row = care.byTask[task];
-    return `<tr><th>${abbr}</th><td>${escapeHtml(label)}</td><td class="score">${percent(row?.classifierAccuracy)}</td><td>${row?.total ?? 0}</td></tr>`;
-  }).join('');
   const mcdRows = methods.map(method => `
     <tr class="${method.status === '无效' ? 'invalid-row' : ''}"><th>${escapeHtml(method.name)}${method.status === '无效' ? '（无效）' : ''}</th><td>${percent(method.avgNcr)}</td><td>${percent(method.avgCrc)}</td><td>${percent(method.avgCc)}</td><td>${method.byTask.multi_hop_clinical_deduction?.total ?? 0}${method.status === '部分' ? '（部分）' : ''}</td></tr>`).join('');
   const efficiencyRows = methods.map(method => `
@@ -480,7 +647,6 @@ function renderHtml(context) {
       <th>${escapeHtml(method.name)}${method.status === '无效' ? '（无效）' : ''}</th>
       <td>${method.total.toLocaleString('zh-CN')}${method.status === '部分' ? ` / ${EXPECTED_TOTAL}` : ''}</td>
       <td>${tokenAverageCell(method)}</td>
-      <td>${tokenAccountingNote(method, care)}</td>
     </tr>`).join('');
 
   return `<!doctype html>
@@ -510,7 +676,7 @@ function renderHtml(context) {
   <header class="hero">
     <div class="eyebrow">MedMemoryBench · 当前工作区快照</div>
     <h1>CareHarness 当前系统实现与实验结果</h1>
-    <p>本报告从当前代码、实验数据库和 baseline 断点自动生成。完整结果与运行中的部分结果严格分开；没有改写 Gold，也没有把未完成的 A‑Mem 当成最终成绩。</p>
+    <p>本报告从当前代码、实验数据库和已冻结的 baseline 断点自动生成。完整结果与暂停时的部分结果严格分开；没有改写 Gold，也没有把未完成的 A‑Mem 当成最终成绩。</p>
     <div class="meta"><span class="chip">分支 ${escapeHtml(branch)}</span><span class="chip">Commit ${escapeHtml(commit)}</span><span class="chip">生成于 ${escapeHtml(formatDate(generatedAt))}</span><span class="chip">当前工作区改动 ${dirtyFiles.length} 项</span></div>
     <nav><a href="#architecture">系统结构</a><a href="#policy">动态 Policy</a><a href="#results">结果总表</a><a href="#persona">Persona 明细</a><a href="#audit">审计说明</a></nav>
   </header>
@@ -565,12 +731,12 @@ function renderHtml(context) {
     <p class="lead">分数均按 JSON/数据库中已经保存的 score 直接聚合，范围 0–100。MCD 的 Avg 使用官方 NCR/CRC/CC 综合 score；其分项见下一张表。</p>
     <div class="table-wrap"><table><thead><tr><th>系统</th>${TASKS.map(([, abbr]) => `<th>${abbr}</th>`).join('')}<th>Avg</th><th>已完成</th></tr></thead><tbody>${resultRows}</tbody></table></div>
     ${invalidLetta.status === '无效' ? `<div class="warning audit"><strong>Letta 旧结果是基础设施失败，不是有效 benchmark 成绩。</strong> 记忆构建错误 ${invalidLetta.integrity.memoryFailures} 次，查询错误 ${invalidLetta.integrity.queryFailures} 次。旧 4.81 分是错误文本被当作答案后产生的污染值，已从结果表移除。</div>` : ''}
-    <div class="warning">Letta 修复后的当前行是 ${letta.total} / ${EXPECTED_TOTAL} 题的断点快照；分片仍在运行，题型分布不均衡，因此只能观察运行健康度，不是最终成绩。</div>
-    <div class="warning">A‑Mem 当前仍在运行，${amem.total} / ${EXPECTED_TOTAL} 题的组成并不均衡，特别是后段题型样本较少；该行只能用于观察断点，不能与完整的有效结果作最终优劣结论。</div>
+    <div class="warning">Letta 当前行是暂停时冻结的 ${letta.total} / ${EXPECTED_TOTAL} 题断点快照；题型分布不均衡，因此不是最终成绩。</div>
+    <div class="warning">A‑Mem 当前行是暂停时冻结的 ${amem.total} / ${EXPECTED_TOTAL} 题结果；每个 Persona 均采用已保存且完成题数最多的有效来源，仍不能与完整结果作最终优劣结论。</div>
     <h3>MCD 官方小分</h3>
     <div class="table-wrap"><table><thead><tr><th>系统</th><th>NCR · 节点覆盖率</th><th>CRC · 因果关系正确率</th><th>CC · 推理链完整性</th><th>MCD 数量</th></tr></thead><tbody>${mcdRows}</tbody></table></div>
     <h3>效率快照</h3>
-    <div class="table-wrap"><table><thead><tr><th>系统</th><th>题数</th><th>平均每题 Token（记录/估算）</th><th>Token 口径</th></tr></thead><tbody>${efficiencyRows}</tbody></table></div>
+    <div class="table-wrap"><table><thead><tr><th>系统</th><th>题数</th><th>平均每题 Token（记录/估算）</th></tr></thead><tbody>${efficiencyRows}</tbody></table></div>
     <p class="note">Long‑Context 按逐题重建的累计病历、128k 截断、Answer Prompt 和 Judge Prompt 估算：输入 47,352,428 Token，输出 88,184 Token，总计 47,440,612 Token，395 题平均 120,103 Token。共 ${LONG_CONTEXT_TOKEN_ESTIMATE.answerCalls} 次 Answer 和 ${LONG_CONTEXT_TOKEN_ESTIMATE.judgeCalls} 次 Judge 调用。Long‑Context 的 Memory Build 只在本地拼接与截断文本，不调用 LLM，因此该阶段计费 Token 为 0。</p>
   </section>
 
@@ -578,8 +744,22 @@ function renderHtml(context) {
     <h2>4. CareHarness 分 Persona 明细</h2>
     <p class="lead">当前完整实验使用 <code>qwen3.7-plus</code>，题型分类器控制 retrieval strategy，真实官方题型继续控制 Answer Prompt 和 metric。</p>
     <div class="table-wrap"><table><thead><tr><th>Persona</th>${TASKS.map(([, abbr]) => `<th>${abbr}</th>`).join('')}<th>Avg</th><th>题数</th></tr></thead><tbody>${personaRows}</tbody></table></div>
-    <h3>题型分类准确率</h3>
-    <div class="table-wrap"><table><thead><tr><th>官方题型</th><th>任务</th><th>预测正确率</th><th>题数</th></tr></thead><tbody>${classifierRows}<tr><th>Avg</th><td>全部 395 题</td><td class="score avg">${percent(care.classifierAccuracy)}</td><td>${care.classifierTotal}</td></tr></tbody></table></div>
+    <h3>Persona 主实验</h3>
+    <div class="table-wrap"><table><thead><tr><th>Persona</th><th>题数</th><th>平均分</th><th>答题准确率</th><th>题型分类准确率</th><th>误分类数</th><th>失败</th></tr></thead><tbody>
+      <tr><th>1</th><td>97</td><td>66.87</td><td>65.98%</td><td>76.29%</td><td>23</td><td>0</td></tr>
+      <tr><th>3</th><td>100</td><td>72.35</td><td>70.00%</td><td>69.00%</td><td>31</td><td>0</td></tr>
+      <tr><th>5</th><td>100</td><td>53.13</td><td>52.00%</td><td>70.00%</td><td>30</td><td>0</td></tr>
+      <tr><th>7</th><td>98</td><td>64.50</td><td>64.29%</td><td>78.57%</td><td>21</td><td>0</td></tr>
+      <tr><th>合计/均值</th><td><strong>395</strong></td><td><strong>64.19</strong></td><td><strong>63.04%</strong></td><td><strong>73.42%</strong></td><td><strong>105</strong></td><td><strong>0</strong></td></tr>
+    </tbody></table></div>
+    <h3>105 道误分类题的路由 A/B 对照</h3>
+    <div class="table-wrap"><table><thead><tr><th>Persona</th><th>题数</th><th>错误分类路由</th><th>官方题型路由</th><th>分数变化</th><th>答对数变化</th></tr></thead><tbody>
+      <tr><th>1</th><td>23</td><td>63.12</td><td>72.08</td><td><strong>+8.96</strong></td><td>14 → 16</td></tr>
+      <tr><th>3</th><td>31</td><td>72.10</td><td>68.27</td><td><strong>-3.83</strong></td><td>20 → 21</td></tr>
+      <tr><th>5</th><td>30</td><td>40.32</td><td>43.51</td><td><strong>+3.19</strong></td><td>11 → 12</td></tr>
+      <tr><th>7</th><td>21</td><td>34.31</td><td>42.45</td><td><strong>+8.14</strong></td><td>7 → 8</td></tr>
+      <tr><th>合计/均值</th><td><strong>105</strong></td><td><strong>53.49</strong></td><td><strong>56.87</strong></td><td><strong>+3.37</strong></td><td><strong>52 → 57</strong></td></tr>
+    </tbody></table></div>
   </section>
 
   <section id="audit">
@@ -593,6 +773,7 @@ function renderHtml(context) {
       <li>Letta 旧无效结果: <code>${escapeHtml(relative(root, lettaPath))}</code></li>
       ${lettaCheckpointPaths.map(path => `<li>Letta 当前 checkpoint: <code>${escapeHtml(relative(root, path))}</code></li>`).join('')}
       ${amemCheckpointPaths.map(path => `<li>A‑Mem checkpoint: <code>${escapeHtml(relative(root, path))}</code></li>`).join('')}
+      ${amemResultPaths.map(path => `<li>A‑Mem 完整 Persona 结果: <code>${escapeHtml(relative(root, path))}</code></li>`).join('')}
     </ul></details>
     <details><summary>关键实现文件</summary><ul class="sources">
       <li><a href="../src/prompts.js">src/prompts.js</a>：Extractor、Family、Relation、Policy、Assess、Answer、Judge Prompt 单一来源。</li>
@@ -612,7 +793,12 @@ function renderHtml(context) {
 
 function tokenAverageCell(method) {
   if (method.tokenEstimate) {
-    return method.tokenEstimate.avgTokensPerQuestion.toLocaleString('zh-CN');
+    const estimate = method.tokenEstimate;
+    const average = estimate.avgTokensPerQuestion?.toLocaleString('zh-CN') ?? '—';
+    if (estimate.kind === 'long_context') return average;
+    const low = estimate.avgTokensLow?.toLocaleString('zh-CN') ?? '—';
+    const high = estimate.avgTokensHigh?.toLocaleString('zh-CN') ?? '—';
+    return `≈ ${average}<span class="cell-sub">估算范围 ${low}–${high}</span>`;
   }
   if (method.tokenUsageComplete === false) {
     return `不可用<span class="cell-sub">仅记录 ${method.recordedCallCount} 次调用</span>`;
@@ -620,26 +806,6 @@ function tokenAverageCell(method) {
   return method.avgRecordedTokens == null
     ? '—'
     : Math.round(method.avgRecordedTokens).toLocaleString('zh-CN');
-}
-
-function tokenAccountingNote(method, care) {
-  if (method === care) {
-    return '查询、Policy、Assess、Answer、Judge 的运行记录；复用图构建不在内';
-  }
-  if (method.tokenEstimate) {
-    const estimate = method.tokenEstimate;
-    return `总计估算 47.44M；${estimate.answerCalls} Answer + ${estimate.judgeCalls} Judge；Memory Build 计费 Token = 0`;
-  }
-  if (method.tokenUsageComplete === false) {
-    const averagePerRecordedCall = method.recordedCallCount
-      ? Math.round(method.recordedTotalTokens / method.recordedCallCount).toLocaleString('zh-CN')
-      : '—';
-    return `续跑时 usage tracker 清零；仅余 ${method.recordedTotalTokens.toLocaleString('zh-CN')} Token / ${method.recordedCallCount} 次调用（约 ${averagePerRecordedCall}/调用）`;
-  }
-  if (method.name.startsWith('A-Mem') || method.name.startsWith('Letta')) {
-    return '当前断点未保存可完整聚合的 Token usage';
-  }
-  return '官方 baseline wrapper 汇总';
 }
 
 function scoreCell(row, status) {
@@ -650,7 +816,7 @@ function scoreCell(row, status) {
 function statusBadge(method) {
   if (method.status === '无效') return '<span class="badge invalid">基础设施失败</span>';
   const complete = method.status === '完整';
-  return `<span class="badge ${complete ? 'complete' : 'partial'}">${complete ? '完整' : '运行中'}</span>`;
+  return `<span class="badge ${complete ? 'complete' : 'partial'}">${complete ? '完整' : '已暂停'}</span>`;
 }
 
 function percent(value) {

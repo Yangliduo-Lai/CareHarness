@@ -32,9 +32,15 @@ data/benchmarks/
 # 运行时学习结果；需要复现实验时由脚本重新生成
 /data/*action-values*.json
 /data/cv-action-policy-*.json
+/data/medlocomo-patient-distillation-*.json
+/data/medlocomo-full-distillation/
+/data/medlocomo-hierarchical-distillation/
 
 # 实验输出可能包含 Benchmark 上下文、Gold 和 Judge 信息
 /reports/
+
+# 本地终端会话日志
+/screenlog.*
 reports/medmemory-careharness-results.json
 reports/optimization-round-*.json
 /outputs/

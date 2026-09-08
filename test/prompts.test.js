@@ -48,6 +48,8 @@ test('MedMemory query classifier is question-only and covers exactly the six pub
 test('semantic evaluator reads only currently visible unified Memory objects',()=>{
   const contract=PROMPTS.careharness_evaluate.contract;
   assert.match(contract,/"connections"/);assert.match(contract,/"reasoning_hypotheses"/);assert.match(contract,/"answer_focus"/);assert.match(contract,/historical Memory Node/);
+  assert.match(contract,/strategy_profile\.strategy_id starts with medlocomo_/);assert.match(contract,/cited source language/);assert.match(contract,/otherwise write them in Simplified Chinese/);
+  assert.match(contract,/minimal verbatim span/);assert.match(contract,/cross-node link only in connections/);
   assert.doesNotMatch(contract,/node_bindings|Need Graph|Evidence-only|option_assessments/);
 });
 
